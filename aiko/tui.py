@@ -20,6 +20,7 @@ from textual.widgets import (Button, Footer, Header, Input, ListItem, ListView,
 from .agent import Orchestrator
 from .brain import Brain, list_brains
 from .backends import get_backend
+from .boot import BootScreen
 
 ROUTING_LOG = Path.home() / ".aiko" / "routing.log"
 
@@ -187,6 +188,41 @@ class AikoTUI(App):
     # ── lifecycle ──────────────────────────────────────────────
 
     def on_mount(self) -> None:
+        # gather real boot facts in a thread while the animation plays
+        facts: list[tuple[str, str]] = []
+        boot = BootScreen(step_results=facts)
+
+        def gather():
+            try:
+                brains = list_brains()
+                facts.append(("brains", f"{len(brains)} configured "
+                              f"({', '.join(b['name'] for b in brains[:3])}"
+                              f"{'…' if len(brains) > 3 else ''})"))
+            except Exception as e:
+                facts.append(("brains", f"error: {e}"[:60]))
+            try:
+                targets = self.backend.list_targets()
+                servers = [t['target'] for t in targets if t.get('status')]
+                locals_ = [t for t in targets if t.get('agents')]
+                if servers:
+                    facts.append(("servers", f"{len(servers)} reachable "
+                                  f"({', '.join(servers)})"))
+                if locals_:
+                    agents = locals_[0].get('agents', [])
+                    facts.append(("local agents", f"{len(agents)} found "
+                                  f"({', '.join(agents[:4])})"))
+            except Exception:
+                facts.append(("targets", "none configured"))
+            from shutil import which
+            facts.append(("concord", "installed 🐾" if which("concord")
+                          else "not found"))
+
+        threading.Thread(target=gather, daemon=True).start()
+        self.push_screen(boot)
+        self.set_timer(2.4, self._finish_mount)
+
+    def _finish_mount(self) -> None:
+        # collect real boot facts (shown next time / instant if re-opened)
         log = self.query_one("#chat_log", RichLog)
         log.write(CAT_BANNER)
         log.write(HELP_TEXT)
@@ -261,7 +297,7 @@ class AikoTUI(App):
             text = event.value.strip()
             if text.startswith("/"):
                 event.input.value = ""
-                await self._handle_slash(text)
+                self.run_worker(self._handle_slash(text), exclusive=False)
             else:
                 await self._handle_chat(text, event.input)
         elif event.input.id == "attach_input":

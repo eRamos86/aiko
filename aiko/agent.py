@@ -81,7 +81,19 @@ class Orchestrator:
     def __init__(self, brain: Brain | None = None, backend=None):
         self.brain = brain or Brain()
         self.backend = backend or get_backend()
-        self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        self.history: list[dict] = [{"role": "system", "content": self._system_prompt()}]
+
+    def _system_prompt(self) -> str:
+        """Base persona + live vault context (Agents/ universal layer) if configured."""
+        from .context import assemble_context
+        base = SYSTEM_PROMPT
+        try:
+            vault_docs = assemble_context("")
+            if vault_docs.strip():
+                return base + "\n\n# Global agent context (from vault)\n" + vault_docs
+        except Exception:
+            pass
+        return base
 
     def switch_brain(self, name: str, reasoning: str | None = None) -> str:
         self.brain = Brain(name=name)
