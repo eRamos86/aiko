@@ -83,9 +83,26 @@ class Orchestrator:
         self.backend = backend or get_backend()
         self.history: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    def switch_brain(self, name: str) -> str:
+    def switch_brain(self, name: str, reasoning: str | None = None) -> str:
         self.brain = Brain(name=name)
+        if reasoning:
+            self.brain.set_reasoning(reasoning)
         return self.brain.describe()
+
+    def plan(self, braindump: str) -> str:
+        """Planning mode: organize a braindump WITHOUT dispatching anything.
+        The reply is instructions Aiko can act on later (dispatch, store, etc)."""
+        plan_prompt = (
+            "# Planning mode\n"
+            "Ace just braindumped. Organize it into a clear, structured plan. "
+            "DO NOT call any tools — nothing gets dispatched from planning mode. "
+            "Structure: (1) what he seems to want, (2) organized tasks with suggested "
+            "task_types and targets, (3) where new information should live (docs/notes "
+            "he should record), (4) open questions if anything's ambiguous. "
+            "End with: 'say the word and I'll dispatch any of these, nya~'\n\n"
+            f"# Braindump\n{braindump}"
+        )
+        return self.step(plan_prompt)
 
     def _execute(self, name: str, args: dict) -> str:
         try:

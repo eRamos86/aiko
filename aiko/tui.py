@@ -1,8 +1,8 @@
-"""Aiko TUI — chat-centric catgirl orchestrator client (ADR-010, FULL catgirl).
+"""Aiko TUI — chat-centric catgirl orchestrator client.
 
-Palette = Aiko shell: pink 213, sky 117, mint 120, salmon 203, lavender 141,
-gray 245 on dark. Tabs: Chat · Sessions · Concord · Status. Slash commands in
-chat: /model /targets /help /clear /reset /status.
+v1.1: interactive /model picker (arrows + reasoning), sessions split
+active/inactive sorted by client→agent, concord opens on tab activation,
+/new replaces /reset, /plan for braindumps.
 """
 import json
 import subprocess
@@ -11,9 +11,11 @@ from pathlib import Path
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal
+from textual.containers import Horizontal, Vertical
+from textual.screen import ModalScreen
 from textual.widgets import (Button, Footer, Header, Input, ListItem, ListView,
-                             RichLog, Select, Static, TabbedContent, TabPane)
+                             OptionList, RichLog, Select, Static,
+                             TabbedContent, TabPane)
 
 from .agent import Orchestrator
 from .brain import Brain, list_brains
@@ -28,15 +30,92 @@ CAT_BANNER = r"""
 """
 
 HELP_TEXT = """[b pink]Aiko slash commands[/b pink]
-  [sky]/model[/sky] [i]<name>[/i]     switch brain (no arg = list)
+  [sky]/model[/sky]            pick brain (↑↓ model, ←→ reasoning, Enter confirm)
+  [sky]/plan[/sky] [i]<dump>[/i]      braindump → organized plan (nothing dispatched)
   [sky]/targets[/sky]          list execution targets (local + servers)
   [sky]/status[/sky]           quick session + target overview
-  [sky]/reset[/sky]            fresh conversation (same brain)
+  [sky]/new[/sky]              fresh conversation (same brain)
   [sky]/clear[/sky]            clear the chat log
   [sky]/help[/sky]             this message
 
-[i gray]keys: 1 chat · 2 sessions · 3 concord · 4 status · ctrl+l concord · q quit[/i gray]"""
+[i gray]keys: 1 chat · 2 sessions · 3 concord · 4 status · q quit[/i gray]"""
 
+REASONING_LEVELS = ["low", "medium", "high"]
+
+
+# ── interactive model picker ─────────────────────────────────────
+
+class ModelPickerScreen(ModalScreen):
+    """↑↓ pick brain · ←→ cycle reasoning · Enter confirm · Esc cancel."""
+    CSS = """
+    #picker { width: 64; height: auto; border: thick #d75fd7; background: #1a1a2e; padding: 1; }
+    #picker_title { color: #ff87ff; text-style: bold; padding: 0 1; }
+    #model_list { height: auto; max-height: 12; }
+    #reasoning_row { height: 1; padding: 0 1; color: #87d7ff; }
+    """
+    BINDINGS = [
+        Binding("left", "reason_left", "reasoning −"),
+        Binding("right", "reason_right", "reasoning +"),
+        Binding("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, current_brain: str | None, current_reasoning: str):
+        super().__init__()
+        self.current_brain = current_brain
+        self.reasoning_index = max(0, REASONING_LEVELS.index(current_reasoning)
+                                  if current_reasoning in REASONING_LEVELS else 1)
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="picker"):
+            yield Static("🐾  pick a brain, nya~", id="picker_title")
+            ol = OptionList(id="model_list")
+            brains = list_brains()
+            for b in brains:
+                label = f"{b['name']} · {b.get('model', '?')}"
+                ol.add_option(label)
+                if b["name"] == self.current_brain:
+                    ol.highlighted = len(ol.options) - 1
+            yield ol
+            yield Static("", id="reasoning_row")
+
+    def on_mount(self) -> None:
+        self._update_reasoning_row()
+
+    def _update_reasoning_row(self) -> None:
+        level = REASONING_LEVELS[self.reasoning_index]
+        self.query_one("#reasoning_row", Static).update(
+            f"  reasoning:  ← ‹ {level} › →")
+
+    def action_reason_left(self) -> None:
+        self.reasoning_index = max(0, self.reasoning_index - 1)
+        self._update_reasoning_row()
+
+    def action_reason_right(self) -> None:
+        self.reasoning_index = min(len(REASONING_LEVELS) - 1, self.reasoning_index + 1)
+        self._update_reasoning_row()
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    def on_option_list_option_selected(self, event) -> None:
+        brains = list_brains()
+        idx = event.option_index if hasattr(event, "option_index") else None
+        # Textual OptionList event: OptionList.OptionSelected has option_id or index
+        try:
+            index = event.option_index
+        except AttributeError:
+            ol = self.query_one("#model_list", OptionList)
+            index = ol.highlighted
+        if index is not None and 0 <= index < len(brains):
+            self.dismiss({
+                "brain": brains[index]["name"],
+                "reasoning": REASONING_LEVELS[self.reasoning_index],
+            })
+        else:
+            self.dismiss(None)
+
+
+# ── main app ─────────────────────────────────────────────────────
 
 class AikoTUI(App):
     CSS = """
@@ -46,7 +125,7 @@ class AikoTUI(App):
     #chat_input:focus { border: tall #ff87ff; }
     #brain_bar { dock: top; height: 3; }
     #brain_label { color: #d75fd7; width: auto; padding: 0 1; }
-    #session_list { height: 30%; border: round #d75fd7; }
+    #session_list { height: 45%; border: round #d75fd7; }
     #attach_log { height: 1fr; border: round #87d7ff; }
     #attach_input { dock: bottom; border: tall #87d7ff; }
     #status_log { height: 1fr; border: round #d75fd7; }
@@ -73,6 +152,7 @@ class AikoTUI(App):
         self.orchestrator: Orchestrator | None = None
         self.busy = False
         self.attached: str | None = None
+        self._concord_open = False
 
     # ── composition ────────────────────────────────────────────
 
@@ -85,14 +165,13 @@ class AikoTUI(App):
                     yield Select(
                         [(f"{b['name']} · {b.get('model', '?')}", b["name"])
                          for b in list_brains()] or [("no brains configured 🐾", None)],
-                        allow_blank=True, id="brain_select",
-                        prompt="brains…")
+                        allow_blank=True, id="brain_select", prompt="brains…")
                     yield Button("reset 🐾", id="reset_btn")
                 yield RichLog(id="chat_log", wrap=True, markup=True)
                 yield Input(placeholder="message Aiko… (Enter to send, /help for commands)",
                             id="chat_input")
             with TabPane("📋 Sessions", id="sessions"):
-                yield Static("worker sessions — select to attach, nya~",
+                yield Static("worker sessions — ● live · select any to attach, nya~",
                              classes="panel-title")
                 yield ListView(id="session_list")
                 yield RichLog(id="attach_log", wrap=True, markup=True)
@@ -112,7 +191,6 @@ class AikoTUI(App):
         log.write(CAT_BANNER)
         log.write(HELP_TEXT)
 
-        # brain select: options set at compose; just set the default value
         brains = list_brains()
         if brains:
             from .config import load_config
@@ -127,9 +205,9 @@ class AikoTUI(App):
         from shutil import which
         if which("concord"):
             msg.update(
-                "🎀 Concord runs in its own tmux session — press [b]ctrl+l[/b] to attach.\n\n"
-                "• [b]ctrl+b then d[/b] — detach back to Aiko (concord keeps running!)\n"
-                "• [b]ctrl+l[/b] — re-attach anytime, nyaa~")
+                "🎀 Concord — activating this tab opens concord fullscreen.\n\n"
+                "• come back with [b]ctrl+b then d[/b] (concord keeps running in tmux!)\n"
+                "• re-enter the tab (or ctrl+l) anytime to jump back in, nyaa~")
         else:
             msg.update("concord not found on this machine, mrrp")
 
@@ -142,6 +220,14 @@ class AikoTUI(App):
         self.set_interval(8.0, self._tick_status_bar)
         self.query_one("#chat_input", Input).focus()
 
+    # ── tab activation → concord ────────────────────────────────
+
+    def on_tabbed_content_tab_activated(self, event) -> None:
+        pane_id = getattr(event, "pane", None)
+        pane_id = getattr(pane_id, "id", pane_id)
+        if pane_id == "concord" and not self._concord_open:
+            self.action_launch_concord()
+
     # ── brain / chat ───────────────────────────────────────────
 
     def _set_brain(self, name: str) -> None:
@@ -150,14 +236,17 @@ class AikoTUI(App):
                 self.orchestrator = Orchestrator(brain=Brain(name=name),
                                                 backend=self.backend)
             else:
-                desc = self.orchestrator.switch_brain(name)
-                self.query_one("#brain_label", Static).update(
-                    f"🐾 [b]{desc}[/b]")
-                return
-            self.query_one("#brain_label", Static).update(
-                f"🐾 [b]{self.orchestrator.brain.describe()}[/b]")
+                self.orchestrator.switch_brain(name)
+            self._update_brain_label()
         except RuntimeError as e:
             self.query_one("#brain_label", Static).update(f"🐾 [red]{e}[/red]")
+
+    def _update_brain_label(self) -> None:
+        if self.orchestrator:
+            b = self.orchestrator.brain
+            reason = getattr(b, "reasoning", "medium")
+            self.query_one("#brain_label", Static).update(
+                f"🐾 [b]{b.describe()}[/b] [gray]· reasoning: {reason}[/gray]")
 
     def on_select_changed(self, event: Select.Changed) -> None:
         if event.select.id == "brain_select":
@@ -165,14 +254,14 @@ class AikoTUI(App):
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "reset_btn":
-            self._slash_reset()
+            self._slash_new()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat_input":
             text = event.value.strip()
             if text.startswith("/"):
                 event.input.value = ""
-                self._handle_slash(text)
+                await self._handle_slash(text)
             else:
                 await self._handle_chat(text, event.input)
         elif event.input.id == "attach_input":
@@ -180,7 +269,7 @@ class AikoTUI(App):
 
     # ── slash commands ─────────────────────────────────────────
 
-    def _handle_slash(self, text: str) -> None:
+    async def _handle_slash(self, text: str) -> None:
         log = self.query_one("#chat_log", RichLog)
         parts = text.split(maxsplit=1)
         cmd, arg = parts[0].lower(), (parts[1].strip() if len(parts) > 1 else "")
@@ -190,25 +279,29 @@ class AikoTUI(App):
         elif cmd == "/clear":
             log.clear()
             log.write("[i gray]log cleared, fresh screen nya~[/i gray]")
-        elif cmd == "/reset":
-            self._slash_reset()
+        elif cmd in ("/new", "/reset"):
+            self._slash_new()
         elif cmd == "/model":
-            if arg:
-                try:
-                    desc = self.orchestrator.switch_brain(arg) if self.orchestrator else Brain(name=arg).describe()
-                    select = self.query_one("#brain_select", Select)
-                    select.value = arg
-                    log.write(f"[pink]brain switched →[/pink] [b]{desc}[/b] nyaa~")
-                except RuntimeError as e:
-                    log.write(f"[red]{e}[/red]")
-            else:
-                brains = list_brains()
-                log.write("[b pink]brains configured:[/b pink]")
-                for b in brains:
-                    cur = " [mint]← current[/mint]" if (self.orchestrator and
-                                                        b["name"] == self.orchestrator.brain.name) else ""
-                    log.write(f"  [sky]{b['name']}[/sky] · {b.get('model', '?')}{cur}")
-                log.write("[i gray]switch with /model <name>[/i gray]")
+            current = self.orchestrator.brain.name if self.orchestrator else None
+            current_reason = getattr(self.orchestrator.brain, "reasoning", "medium") if self.orchestrator else "medium"
+            picker = ModelPickerScreen(current, current_reason)
+            result = await self.push_screen_wait(picker)
+            if result:
+                self.orchestrator.switch_brain(result["brain"],
+                                               reasoning=result["reasoning"])
+                select = self.query_one("#brain_select", Select)
+                select.value = result["brain"]
+                self._update_brain_label()
+                log.write(f"[pink]brain switched →[/pink] "
+                          f"[b]{self.orchestrator.brain.describe()}[/b] "
+                          f"[gray]· reasoning: {result['reasoning']}[/gray] nyaa~")
+        elif cmd == "/plan":
+            if not arg:
+                log.write("[red]/plan needs your braindump, nya — "
+                          "/plan <everything on your mind>[/red]")
+                return
+            log.write("[pink]planning mode[/pink] — organizing your braindump…")
+            await self._handle_plan(arg)
         elif cmd == "/targets":
             targets = self.backend.list_targets()
             log.write("[b pink]targets:[/b pink]")
@@ -223,13 +316,39 @@ class AikoTUI(App):
         else:
             log.write(f"[red]unknown command {cmd}[/red] — /help for the list, mrrp")
 
-    def _slash_reset(self) -> None:
+    def _slash_new(self) -> None:
         if self.orchestrator:
             self.orchestrator.reset()
         log = self.query_one("#chat_log", RichLog)
         log.clear()
         log.write(CAT_BANNER)
         log.write("[i gray]fresh conversation, same brain nya~[/i gray]")
+
+    # ── planning mode (/plan) ──────────────────────────────────
+
+    async def _handle_plan(self, braindump: str) -> None:
+        log = self.query_one("#chat_log", RichLog)
+        log.write(f"[b mint]you (braindump)[/b mint]  {braindump}")
+        if not self.orchestrator:
+            log.write("[red]no brain — configure ~/.aiko/config.yaml[/red]")
+            return
+        if self.busy:
+            log.write("[i gray](Aiko is still thinking, one moment~)[/i gray]")
+            return
+        self.busy = True
+        input_box = self.query_one("#chat_input", Input)
+        input_box.placeholder = "Aiko is planning… ฅ(˘ω˘ )ฅ"
+
+        def run():
+            try:
+                reply = self.orchestrator.plan(braindump)
+                self.call_from_thread(self._write_reply, reply)
+            except Exception as e:
+                self.call_from_thread(self._write_reply, f"[red]mrrp, error: {e}[/red]")
+            finally:
+                self.call_from_thread(self._chat_done)
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ── chat with the agent ─────────────────────────────────────
 
@@ -271,43 +390,73 @@ class AikoTUI(App):
         except Exception:
             pass
 
-    # ── sessions / attach ───────────────────────────────────────
+    # ── sessions: active/inactive views, sorted client→agent ──
+
+    def _normalize_sessions(self) -> list[dict]:
+        rows = []
+        for s in self.backend.list_sessions():
+            sid = s["id"]
+            client = s.get("server") or ("local" if sid.startswith("local-") else "?")
+            rows.append({
+                "id": sid, "client": client,
+                "agent": s.get("provider", "-"),
+                "state": s.get("session_state", "?"),
+                "title": s.get("title", ""),
+            })
+        return rows
 
     def _tick_sessions(self) -> None:
         if not self.is_attached:
             return
         try:
             lv = self.query_one("#session_list", ListView)
-            sessions = self.backend.list_sessions()
         except Exception:
             return
+        rows = self._normalize_sessions()
+        active = sorted([r for r in rows if r["state"] == "live"],
+                         key=lambda r: (r["client"], r["agent"], r["id"]))
+        inactive = sorted([r for r in rows if r["state"] != "live"],
+                          key=lambda r: (r["client"], r["agent"], r["id"]))
         lv.clear()
-        for s in sessions:
-            marker = "●" if s.get("session_state") == "live" else " "
+        lv.append(ListItem(Static(f"[b pink]── ● active ({len(active)}) ──[/b pink]")))
+        for r in active:
             lv.append(ListItem(Static(
-                f"{marker} {s['id'][:14]}  {s.get('provider', '-'):<12} "
-                f"{s.get('session_state', '-'):<8} {s.get('title', '')[:40]}")))
+                f"  ● [sky]{r['id'][:14]}[/sky]  {r['client']:<12} {r['agent']:<12} {r['title'][:38]}")))
+        lv.append(ListItem(Static(f"[b gray]── ○ inactive ({len(inactive)}) ──[/b gray]")))
+        for r in inactive:
+            lv.append(ListItem(Static(
+                f"    [gray]{r['id'][:14]}  {r['client']:<12} {r['agent']:<12} {r['title'][:38]}[/gray]")))
+        self._session_rows = active + inactive
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
         if event.list_view.id != "session_list":
             return
-        try:
-            sessions = self.backend.list_sessions()
-            idx = event.list_view.index
-            if idx is not None and idx < len(sessions):
-                self._attach(sessions[idx]["id"])
-        except Exception:
-            pass
+        # section headers occupy indices; map selection to nearest session row
+        rows = getattr(self, "_session_rows", [])
+        idx = event.list_view.index
+        if idx is None or not rows:
+            return
+        # list layout: 1 header + active rows + 1 header + inactive rows
+        n_active = sum(1 for r in rows if r["state"] == "live")
+        data_idx = None
+        if idx <= n_active and idx >= 1:
+            data_idx = idx - 1
+        elif idx >= n_active + 2:
+            data_idx = n_active + (idx - n_active - 2)
+        if data_idx is not None and 0 <= data_idx < len(rows):
+            self._attach_session(rows[data_idx]["id"], rows[data_idx]["state"])
 
-    def _attach(self, sid: str) -> None:
+    def _attach_session(self, sid: str, state: str = "?") -> None:
         self.attached = sid
         try:
             log = self.query_one("#attach_log", RichLog)
         except Exception:
             return
         log.clear()
-        log.write(f"[b]attached to {sid}[/b] — live transcript below, "
-                  "type to message the worker nya~")
+        mark = "● live" if state == "live" else "○ finished"
+        log.write(f"[b]attached to {sid}[/b] [{mark}] — transcript below"
+                  + (" — type to steer the worker nya~" if state == "live"
+                     else " — session finished; reads work, sends won't, mrrp"))
 
     def _tick_attached(self) -> None:
         if not self.attached or not self.is_attached:
@@ -382,14 +531,19 @@ class AikoTUI(App):
         if not which("concord"):
             self.notify("concord not installed, mrrp")
             return
-        import subprocess
-        r = subprocess.run(["tmux", "has-session", "-t", "concord"], capture_output=True)
-        if r.returncode != 0:
-            subprocess.run(["tmux", "new-session", "-d", "-s", "concord",
-                            "-x", "200", "-y", "50", "command concord"], check=True)
-        with self.suspend():
-            subprocess.run(["env", "-u", "TMUX",
-                            "tmux", "attach-session", "-t", "concord"])
+        self._concord_open = True
+        try:
+            import subprocess
+            r = subprocess.run(["tmux", "has-session", "-t", "concord"],
+                               capture_output=True)
+            if r.returncode != 0:
+                subprocess.run(["tmux", "new-session", "-d", "-s", "concord",
+                                "-x", "200", "-y", "50", "command concord"], check=True)
+            with self.suspend():
+                subprocess.run(["env", "-u", "TMUX",
+                                "tmux", "attach-session", "-t", "concord"])
+        finally:
+            self._concord_open = False
 
     # ── tabs ────────────────────────────────────────────────────
 

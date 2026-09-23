@@ -44,7 +44,7 @@ def list_brains() -> list[dict]:
 class Brain:
     """Chat completions with history + tools. Provider-agnostic."""
 
-    def __init__(self, name: str | None = None):
+    def __init__(self, name: str | None = None, reasoning: str = "medium"):
         cfg = _load_cfg()
         brains = cfg.get("brains", [])
         if not brains:
@@ -65,6 +65,7 @@ class Brain:
         self.base_url = brain.get("base_url", "").rstrip("/")
         self.endpoint = brain.get("endpoint", "http://localhost:11434").rstrip("/")
         self.api_key = _expand(brain.get("api_key", ""))
+        self.reasoning = reasoning  # low | medium | high — hint for providers
 
         if self.type == "openai_compatible" and not self.api_key:
             raise RuntimeError(f"Brain '{self.name}' has no api_key (or its ${{ENV}} is unset)")
@@ -73,6 +74,9 @@ class Brain:
         if self.type == "ollama":
             return f"{self.name} (ollama:{self.model})"
         return f"{self.name} ({self.model})"
+
+    def set_reasoning(self, level: str) -> None:
+        self.reasoning = level
 
     # ── fallback chain within same provider type ─────────────────
     def _sibling_models(self) -> list[str]:
