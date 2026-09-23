@@ -31,7 +31,7 @@ Decompose the goal into concrete tasks and dispatch. Sequential work (fix → do
 
 
 def _tool_defs() -> list[dict]:
-    return [
+    base = [
         {"type": "function", "function": {
             "name": "list_targets",
             "description": "List execution targets: local agents + configured servers with health.",
@@ -75,6 +75,13 @@ def _tool_defs() -> list[dict]:
             "parameters": {"type": "object", "properties": {}},
         }},
     ]
+    # MCP servers from config extend the tool surface dynamically
+    try:
+        from .mcp_client import load_mcp_clients, mcp_tools_spec
+        base.extend(mcp_tools_spec(load_mcp_clients()))
+    except Exception:
+        pass
+    return base
 
 
 class Orchestrator:
@@ -117,6 +124,15 @@ class Orchestrator:
         return self.step(plan_prompt)
 
     def _execute(self, name: str, args: dict) -> str:
+        # MCP tools first (mcp_<server>_<tool>) — config-driven, no code change needed to add more
+        if name.startswith("mcp_"):
+            from .mcp_client import mcp_dispatch, load_mcp_clients
+            try:
+                return mcp_dispatch(load_mcp_clients(), name, args)[-6000:]
+            except KeyError:
+                return json.dumps({"error": f"unknown MCP tool {name}"})
+            except Exception as e:
+                return json.dumps({"error": f"MCP {name}: {e}"})
         try:
             b = self.backend
             if name == "list_targets":

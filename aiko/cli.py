@@ -64,12 +64,21 @@ def model():
 
 
 @app.command()
-def config():
-    """Print the current config path and open the default for editing."""
-    from .config import CONFIG_PATH, DEFAULT_CONFIG, write_default_if_missing
-    if write_default_if_missing():
-        typer.echo(f"Wrote default config to {CONFIG_PATH} — edit it to your liking! 🐾")
-    typer.echo(f"Config: {CONFIG_PATH}")
+def config(
+    edit: bool = typer.Option(False, "--edit", "-e", help="open the raw YAML for editing instead of the wizard"),
+):
+    """Guided config wizard (or --edit for the raw YAML)."""
+    from .config import CONFIG_PATH, write_default_if_missing
+    if edit:
+        if write_default_if_missing():
+            typer.echo(f"Wrote default config to {CONFIG_PATH} 🐾")
+        typer.echo(f"Opening {CONFIG_PATH} in $EDITOR…")
+        import os
+        import subprocess
+        subprocess.run([os.environ.get("EDITOR", "vim"), str(CONFIG_PATH)])
+        return
+    from .config_wizard import run_wizard
+    run_wizard()
 
 
 @app.command()

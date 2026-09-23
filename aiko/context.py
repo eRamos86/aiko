@@ -48,11 +48,23 @@ def fetch_doc(provider: dict, path: str) -> str | None:
 
 
 def assemble_context(task_spec: str) -> str:
-    """Attach every provider's `attach:` docs to a task spec (for dispatch)."""
+    """Attach every provider's `attach:` docs to a task spec (for dispatch).
+
+    Lazy-load pattern: by default, providers may declare `lazy_attach:` —
+    a small index doc (Context Router) that points to the rest of the vault.
+    Aiko injects the router into her system prompt, and attaches only the
+    docs a task needs via `assemble_context`, keeping prompts modular.
+    """
     cfg = _load_cfg()
     parts = [task_spec]
     for provider in cfg.get("context_providers", []):
-        for doc_path in provider.get("attach", []):
+        attach = list(provider.get("attach", []))
+        # lazy pattern: if a provider declares lazy_attach (an index doc),
+        # inject ONLY that doc — the agent fetches the rest on demand.
+        lazy = provider.get("lazy_attach", [])
+        if lazy:
+            attach = lazy
+        for doc_path in attach:
             content = fetch_doc(provider, doc_path)
             if content:
                 parts.append(f"---\n# Context: {doc_path}\n{content}\n")
