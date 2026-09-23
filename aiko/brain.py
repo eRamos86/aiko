@@ -126,7 +126,7 @@ class Brain:
             r = httpx.post(f"{self.base_url}/chat/completions",
                            headers={"Authorization": f"Bearer {self.api_key}"},
                            json=body, timeout=180)
-            if r.status_code in (429, 503):
+            if r.status_code in (429, 500, 502, 503):
                 last_err = f"{model}: {r.status_code}"
                 continue
             r.raise_for_status()
