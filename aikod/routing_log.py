@@ -3,7 +3,7 @@ import json
 import time
 from pathlib import Path
 
-LOG_PATH = Path.home() / ".aiko" / "routing.log"
+LOG_PATH = Path.home() / ".aikod" / "routing.log"
 
 
 def write_decision(task_id: str, decision) -> None:
