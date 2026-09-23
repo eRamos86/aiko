@@ -82,8 +82,11 @@ class AikoTUI(App):
             with TabPane("💬 Chat", id="chat"):
                 with Horizontal(id="brain_bar"):
                     yield Static("🐾", id="brain_label")
-                    yield Select([], allow_blank=False, id="brain_select",
-                                 prompt="brains…")
+                    yield Select(
+                        [(f"{b['name']} · {b.get('model', '?')}", b["name"])
+                         for b in list_brains()] or [("no brains configured 🐾", None)],
+                        allow_blank=True, id="brain_select",
+                        prompt="brains…")
                     yield Button("reset 🐾", id="reset_btn")
                 yield RichLog(id="chat_log", wrap=True, markup=True)
                 yield Input(placeholder="message Aiko… (Enter to send, /help for commands)",
@@ -109,16 +112,14 @@ class AikoTUI(App):
         log.write(CAT_BANNER)
         log.write(HELP_TEXT)
 
-        # brain select from config
+        # brain select: options set at compose; just set the default value
         brains = list_brains()
-        select = self.query_one("#brain_select", Select)
-        select.set_options([(f"{b['name']} · {b.get('model', '?')}", b["name"])
-                            for b in brains])
         if brains:
             from .config import load_config
             default = load_config().get("default_brain")
             first = next((b["name"] for b in brains if b["name"] == default),
                          brains[0]["name"])
+            select = self.query_one("#brain_select", Select)
             select.value = first
             self._set_brain(first)
 
