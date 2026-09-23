@@ -1,0 +1,36 @@
+[project]
+name = "aiko"
+version = "1.0.0"
+description = "Aiko — The Agent Orchestrator for all your AI Agents"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+  "typer>=0.12",
+  "rich>=13.7",
+  "httpx>=0.27",
+  "textual>=0.60",
+  "pyyaml>=6.0",
+  "pyjwt>=2.8",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "requests>=2.31",
+]
+
+[project.scripts]
+aiko = "aiko.cli:app"
+aikod = "aikod.__main__:main"
+aao = "aiko.cli:app"
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx2>=0.27"]
+
+[tool.pytest.ini_options]
+testpaths = ["aiko/tests", "aikod/tests"]
+asyncio_mode = "auto"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["aiko", "aikod"]
