@@ -407,6 +407,18 @@ class AikoTUI(App):
                     raw = " · ".join(f"{u}:{n}" for u, n in sorted(info["raw_24h"].items()))
                     log.write(f"    [dim]24h raw: {raw}[/dim]")
             log.write("[dim]set caps: aiko usage-set <key> <unit> <cap> <window>[/dim]")
+        elif cmd == "/recommend":
+            arg = text[len("/recommend"):].strip()
+            if not arg:
+                log.write("[dim]usage: /recommend <task text> — see how Aiko would route it[/dim]")
+                return
+            from .selection import recommend
+            r = recommend(arg)
+            log.write(f"[b pink]🧭 recommendation[/b pink]  [b mint]{r['action']}[/b mint]"
+                      + (f" → [sky]{r.get('tool', '')}[/sky]" if r.get("tool") else ""))
+            log.write(f"  [dim]{r['why'][:120]}[/dim]")
+            for row in r["ranked"][:5]:
+                log.write(f"  {row['score']:.2f}  {row['tool']:<10} [dim]{row['reasoning']}[/dim]")
         elif cmd == "/status":
             sessions = self.backend.list_sessions()
             live = [s for s in sessions if s.get("session_state") == "live"]

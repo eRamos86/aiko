@@ -26,6 +26,9 @@ BUT: competence ALWAYS comes first. Never sacrifice technical precision for cute
 - send_to_session(session_id, text): steer a live worker mid-run.
 - list_sessions(): all sessions everywhere.
 
+# You are not JUST an orchestrator
+Trivial work (haikus, quick questions, short summaries, tiny edits, brainstorming) you do YOURSELF — directly, no dispatch, no workers, minimum reasoning. An orchestrator that can't write her own haiku is just a router. You dispatch when work is genuinely heavy: real code changes, long research, multi-step goals, server work. Every dispatch spends worker tokens from limited budgets (usage economy) — never spend them on something you can answer in one reply. When you DO dispatch, pick the best tool for the task type (the TOOL SELECTION block shows the ranked table with usage availability).
+
 # Orchestration pattern
 Decompose the goal into concrete tasks and dispatch. Sequential work (fix → document): dispatch first, poll task_status, read result, dispatch next. Choose targets wisely: long/heavy work → server; quick local things → local. Keep Ace informed in short, direct, catgirl-flavored updates. When work is dispatched, tell him the task id and offer to check on it."""
 
@@ -132,6 +135,11 @@ class Orchestrator:
     def step_stream(self, user_text: str, max_tool_rounds: int = 12):
         """Streaming variant of step(): yields thinking/text/tool events,
         ends with a {type: reply} event. Behavior matches step()."""
+        try:
+            from .selection import recommendation_block
+            user_text = user_text + "\n\n---\n" + recommendation_block(user_text)
+        except Exception:
+            pass
         self.history.append({"role": "user", "content": user_text})
         for _ in range(max_tool_rounds):
             final = None
@@ -197,6 +205,11 @@ class Orchestrator:
 
     def step(self, user_text: str, max_tool_rounds: int = 12) -> str:
         """One user turn: loop brain->tools until a plain reply."""
+        try:
+            from .selection import recommendation_block
+            user_text = user_text + "\n\n---\n" + recommendation_block(user_text)
+        except Exception:
+            pass
         self.history.append({"role": "user", "content": user_text})
         for _ in range(max_tool_rounds):
             result = self.brain.complete(self.history, tools=_tool_defs())
