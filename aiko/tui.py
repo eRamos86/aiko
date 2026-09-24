@@ -95,6 +95,14 @@ class ModelPickerScreen(ModalScreen):
             for m in cat.get("ollama_installable", []):
                 rows.append({"kind": "pull", "provider": "ollama", "model": m,
                              "label": f"{self.PullHint} ollama:{m}"})
+            # sized variants (fits-flagged) appear above unsized family rows
+            from .models_catalog import registry_pull_models
+            for v in registry_pull_models():
+                mark = "✓ fits" if v["fits"] else "⚠ too big here"
+                gb = f"~{v['gb']}GB" if v["gb"] else "?unknown size"
+                rows.append({"kind": "pull", "provider": "ollama",
+                             "model": v["model"],
+                             "label": f"{self.PullHint} ollama:{v['model']}  [{gb} · {mark}]"})
         except Exception:
             pass
         return rows
