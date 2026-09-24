@@ -34,6 +34,7 @@ HELP_TEXT = """[b pink]Aiko slash commands[/b pink]
   [sky]/model[/sky]            pick brain (↑↓ model, ←→ reasoning, Enter confirm)
   [sky]/plan[/sky] [i]<dump>[/i]      braindump → organized plan (nothing dispatched)
   [sky]/targets[/sky]          list execution targets (local + servers)
+  [sky]/usage[/sky]            usage economy: budgets, consumption, cooldowns
   [sky]/status[/sky]           quick session + target overview
   [sky]/new[/sky]              fresh conversation (same brain)
   [sky]/clear[/sky]            clear the chat log
@@ -388,6 +389,24 @@ class AikoTUI(App):
             log.write("[b pink]targets:[/b pink]")
             for t in targets:
                 log.write(f"  [sky]{t.get('target')}[/sky]  {json.dumps(t, default=str)[:120]}")
+        elif cmd == "/usage":
+            from .usage import snapshot_all
+            snap = snapshot_all()
+            log.write("[b pink]🪙 usage economy[/b pink]")
+            if not snap:
+                log.write("  [dim](no usage recorded yet, nya)[/dim]")
+            for key, info in snap.items():
+                cds = info["cooldown_s"]
+                state = ("[b red]COOLDOWN " if cds else "")
+                log.write(f"  [b sky]{key}[/b sky] {state}"
+                          + (f"{cds}s[/b red]" if cds else ""))
+                for b in info["budgets"]:
+                    log.write(f"    {b['unit']}: {b['used']}/{b['cap']} "
+                              f"[dim](resets in {int(b['resets_in'])}s)[/dim]")
+                if info["raw_24h"]:
+                    raw = " · ".join(f"{u}:{n}" for u, n in sorted(info["raw_24h"].items()))
+                    log.write(f"    [dim]24h raw: {raw}[/dim]")
+            log.write("[dim]set caps: aiko usage-set <key> <unit> <cap> <window>[/dim]")
         elif cmd == "/status":
             sessions = self.backend.list_sessions()
             live = [s for s in sessions if s.get("session_state") == "live"]

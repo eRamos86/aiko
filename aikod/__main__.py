@@ -30,6 +30,12 @@ def spawn_routed_task(db_path, adapters, task_id, decision):
 
     session_id = adapter.spawn({"id": task_id, "spec": spec, "model": decision.model},
                                str(bundle_path))
+    # usage economy: every worker spawn counts against its rolling window
+    try:
+        from .usage import note_spawn
+        note_spawn(decision.provider_id, decision.model)
+    except Exception:
+        pass
     conn.execute(
         "INSERT INTO session(id, task_id, provider_id, model, state) VALUES (?,?,?,?, 'live')",
         (session_id, task_id, decision.provider_id, decision.model),
@@ -71,6 +77,22 @@ def orchestrator_loop(db_path, adapters, poll_interval: float = 5.0):
                         "is done, reply with a short completion summary for "
                         "the goal. If more work is needed, dispatch subtasks "
                         "on this server. Do not ask the user questions.")
+                    # usage economy: scan for limit-exceeded phrases → cooldown
+                    try:
+                        from .usage import in_cooldown, note_transcript_limits
+                        conn3 = connect(Path(db_path))
+                        sess_row = conn3.execute(
+                            "SELECT provider_id FROM session WHERE task_id=?",
+                            (task_id,)).fetchone()
+                        if sess_row and in_cooldown(sess_row[0]) <= 0:
+                            from pathlib import Path as _P
+                            for cand in (_P.home() / ".aikod" / "transcripts").glob(f"{task_id}*"):
+                                if cand.is_file():
+                                    note_transcript_limits(sess_row[0],
+                                                           cand.read_text(errors="replace"))
+                                    break
+                    except Exception:
+                        pass
                     conn2 = connect(Path(db_path))
                     conn2.execute(
                         "INSERT INTO orchestrator_run(task_id, reply, ts) "

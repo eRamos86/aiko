@@ -130,11 +130,19 @@ class Brain:
             r = httpx.post(f"{self.base_url}/chat/completions",
                            headers={"Authorization": f"Bearer {self.api_key}"},
                            json=body, timeout=180)
+            if r.status_code == 429:
+                from .usage import note_429, provider_key
+                note_429(provider_key(self.base_url), model,
+                         r.headers.get("retry-after"))
             if r.status_code in (429, 500, 502, 503):
                 last_err = f"{model}: {r.status_code}"
                 continue
             r.raise_for_status()
-            msg = r.json()["choices"][0]["message"]
+            data = r.json()
+            from .usage import note_response, provider_key
+            note_response(provider_key(self.base_url), model,
+                          usage=data.get("usage"))
+            msg = data["choices"][0]["message"]
             tool_calls = []
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function", {})

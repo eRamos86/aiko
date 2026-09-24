@@ -21,6 +21,7 @@ from .routing_log import write_decision
 
 ROUTER_YAML_PATH = Path.home() / ".aiko" / "router.yaml"
 OBSERVED_PATH = Path.home() / ".aiko" / "observed.json"
+HARD_SKIP = 10.0
 
 DEFAULT_YAML = """# Aiko router floor — explicit preferences. Observed signal in observed.json
 # adjusts weights up/down from these baselines.
@@ -110,6 +111,19 @@ def choose(task_type: str, task_id: str, locality: str = "auto",
                 continue
             yscore, omod = score_pair(adapter_id, model.name, task_type, yaml_floor, observed)
             final = max(0.0, min(1.0, yscore + omod))
+            # Usage economy: cooldown/exhausted → skip; heavy use → penalty
+            usage_penalty = 0.0
+            usage_note = ""
+            try:
+                from .usage import penalty
+                usage_penalty = penalty(adapter_id)
+            except Exception:
+                pass
+            if usage_penalty >= HARD_SKIP:
+                continue
+            if usage_penalty:
+                final = max(0.0, final - usage_penalty)
+                usage_note = f" usage=-{usage_penalty}"
             candidates.append({
                 "provider": adapter_id, "model": model.name,
                 "yaml": yscore, "observed_mod": omod, "final": final,

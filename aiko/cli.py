@@ -95,5 +95,33 @@ def routing(tail: bool = typer.Option(False, "-f")):
         typer.echo(log.read_text()[-4000:])
 
 
+@app.command()
+def usage():
+    """Show the usage economy: budgets, consumption, cooldowns."""
+    from .usage import snapshot_all
+    snap = snapshot_all()
+    if not snap:
+        typer.echo("(no usage recorded yet, nya)")
+        return
+    for key, info in snap.items():
+        mark = " ⏸COOLDOWN" if info["cooldown_s"] else ""
+        typer.echo(f"🪙 {key}{mark}")
+        for b in info["budgets"]:
+            typer.echo(f"    {b['unit']}: {b['used']}/{b['cap']}"
+                       f"  (resets in {int(b['resets_in'])}s)")
+        if info["raw_24h"]:
+            raw = " · ".join(f"{u}:{n}" for u, n in sorted(info["raw_24h"].items()))
+            typer.echo(f"    24h raw: {raw}")
+
+
+@app.command()
+def usage_set(key: str, unit: str, cap: int, window: str):
+    """Set a budget cap: aiko usage-set nim requests 40 5h."""
+    from .usage import set_budget
+    result = set_budget(key, unit, cap, window)
+    typer.echo(f"✓ {result['key']}: {result['unit']} cap={result['cap']} "
+               f"window={result['window']}s, nya~")
+
+
 if __name__ == "__main__":
     app()
