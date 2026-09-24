@@ -76,8 +76,28 @@ def _fetch_provider(key: str, brain: dict) -> list[str] | None:
         return None
 
 
+def _fetch_ollama_installable(local: set[str]) -> list[str]:
+    """Popular pullable models from ollama.com/library, minus installed."""
+    import httpx
+    try:
+        r = httpx.get("https://ollama.com/library", timeout=15,
+                      headers={"User-Agent": "aiko-catalog/1.0"})
+        r.raise_for_status()
+        names = set(re.findall(r"/library/([a-z0-9][a-z0-9._-]*)", r.text))
+        junk = {"search", "blog", "docs", "download", "signin", "signup",
+                "latest", "tags", "models", "api", "library"}
+        found = sorted(n for n in names if n not in junk)
+        return [n for n in found if n not in local][:40]
+    except Exception:
+        return [m for m in ["llama3.3:70b", "qwen3:32b", "qwen3-coder:30b",
+                            "deepseek-r1:14b", "mistral:7b", "gemma3:12b"]
+                if m not in local]
+
+
 def catalog(force: bool = False) -> dict[str, list[str]]:
-    """{provider_key: [model ids]} — cached 24h; providers from config creds."""
+    """{provider_key: [model ids]} — cached 24h; providers from config creds.
+
+    Extra key `ollama_installable` = popular registry pulls not yet local."""
     now = time.time()
     if not force and CACHE_PATH.exists():
         try:
@@ -91,6 +111,9 @@ def catalog(force: bool = False) -> dict[str, list[str]]:
         ids = _fetch_provider(key, brain)
         if ids:
             models[key] = sorted(set(ids))
+    if models.get("ollama"):
+        models["ollama_installable"] = _fetch_ollama_installable(
+            set(models["ollama"]))
     CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
     CACHE_PATH.write_text(json.dumps({"ts": now, "models": models}))
     return models
@@ -105,6 +128,8 @@ def rank_models(task_shape: str, limit: int = 12) -> list[dict]:
     from .feedback import modifier_for
     rows = []
     for prov, ids in catalog().items():
+        if prov == "ollama_installable":
+            continue  # ranking is for usable-now models
         for m in ids:
             prior = priors_for(m).get(task_shape, 0.5)
             fb = modifier_for("self", task_shape, model=m)

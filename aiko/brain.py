@@ -129,9 +129,27 @@ class Brain:
     def _complete_ollama(self, messages, tools) -> dict:
         body = {"model": self.model, "messages": messages, "stream": False}
         if tools:
+            # Ollama native API: tools belong at TOP level and want the
+            # OpenAI-style {"type":"function","function":{...}} schema —
+            # BUT only for models that actually support tools. Sending an
+            # empty tools list, or tools to a non-tool model, makes some
+            # Ollama builds 400 the whole request (template error). So:
+            # only attach tools when non-empty; let the server decide.
             body["tools"] = tools
-        r = httpx.post(f"{self.endpoint}/api/chat", json=body, timeout=180)
-        r.raise_for_status()
+        try:
+            r = httpx.post(f"{self.endpoint}/api/chat", json=body, timeout=300)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            detail = e.response.text[:300] if e.response is not None else ""
+            # One graceful retry WITHOUT tools (non-tool model / old template)
+            if e.response is not None and e.response.status_code == 400 and \
+                    body.get("tools"):
+                body.pop("tools", None)
+                r = httpx.post(f"{self.endpoint}/api/chat", json=body, timeout=300)
+                r.raise_for_status()
+            else:
+                raise RuntimeError(
+                    f"ollama {self.model}: {e.response.status_code if e.response else e} {detail}") from e
         data = r.json()
         tool_calls = []
         for tc in data.get("message", {}).get("tool_calls") or []:
@@ -331,39 +349,53 @@ def _brain_stream_openai(self, messages, tools):
 
 
 def _brain_stream_ollama(self, messages, tools):
-    """Ollama /api/chat NDJSON stream → same event vocabulary."""
-    body = {"model": self.model, "messages": messages, "stream": True}
-    if tools:
-        body["tools"] = tools
-    tool_calls = []
-    text = ""
-    with httpx.stream("POST", f"{self.endpoint}/api/chat", json=body, timeout=300) as r:
-        r.raise_for_status()
-        for line in r.iter_lines():
-            if not line.strip():
-                continue
-            try:
-                chunk = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            msg = chunk.get("message", {})
-            th = msg.get("thinking")
-            if th:
-                yield {"type": "thinking", "delta": th}
-            c = msg.get("content", "")
-            if c:
-                text += c
-                yield {"type": "text", "delta": c}
-            for tc in msg.get("tool_calls") or []:
-                fn = tc.get("function", {})
-                args = fn.get("arguments", {})
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except json.JSONDecodeError:
-                        args = {"_raw": args}
-                tool_calls.append({"name": fn.get("name", ""), "arguments": args})
-    yield {"type": "final", "content": text, "tool_calls": tool_calls}
+    """Ollama /api/chat NDJSON stream → same event vocabulary.
+
+    400-with-tools fallback: some models/templates reject tool schemas
+    (empty list or unsupported 'tools' field) — retry once without tools
+    so a chat never hard-errors on a model that can't call tools."""
+    def _attempt(with_tools: bool):
+        body = {"model": self.model, "messages": messages, "stream": True}
+        if with_tools and tools:
+            body["tools"] = tools
+        tool_calls = []
+        text = ""
+        with httpx.stream("POST", f"{self.endpoint}/api/chat",
+                          json=body, timeout=300) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    chunk = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                msg = chunk.get("message", {})
+                th = msg.get("thinking")
+                if th:
+                    yield {"type": "thinking", "delta": th}
+                c = msg.get("content", "")
+                if c:
+                    text += c
+                    yield {"type": "text", "delta": c}
+                for tc in msg.get("tool_calls") or []:
+                    fn = tc.get("function", {})
+                    args = fn.get("arguments", {})
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except json.JSONDecodeError:
+                            args = {"_raw": args}
+                    tool_calls.append({"name": fn.get("name", ""), "arguments": args})
+        yield {"type": "final", "content": text, "tool_calls": tool_calls}
+
+    try:
+        yield from _attempt(with_tools=True)
+    except httpx.HTTPStatusError as e:
+        if e.response is not None and e.response.status_code == 400 and tools:
+            yield from _attempt(with_tools=False)
+        else:
+            raise
 
 
 def _brain_complete_stream(self, messages, tools=None):

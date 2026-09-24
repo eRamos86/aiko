@@ -48,11 +48,19 @@ REASONING_LEVELS = ["low", "medium", "high"]
 # ── interactive model picker ─────────────────────────────────────
 
 class ModelPickerScreen(ModalScreen):
-    """↑↓ pick brain · ←→ cycle reasoning · Enter confirm · Esc cancel."""
+    """↑↓ pick · type to filter · ←→ reasoning · Enter confirm · Esc cancel.
+
+    Sources: configured brains ALWAYS first (marked ✓), then any other
+    model from the live catalog — NIM's 82+ and Ollama local/pullable.
+    Picking a non-configured model creates an ad-hoc brain via
+    Brain.from_provider_model (ADR-017). '↓ pull:' rows trigger an
+    `ollama pull` in the background when chosen.
+    """
     CSS = """
-    #picker { width: 64; height: auto; border: thick #d75fd7; background: #1a1a2e; padding: 1; }
+    #picker { width: 76; height: auto; border: thick #d75fd7; background: #1a1a2e; padding: 1; }
     #picker_title { color: #ff87ff; text-style: bold; padding: 0 1; }
-    #model_list { height: auto; max-height: 12; }
+    #model_filter { border: tall #d75fd7; background: #14142a; }
+    #model_list { height: auto; max-height: 16; }
     #reasoning_row { height: 1; padding: 0 1; color: #87d7ff; }
     """
     BINDINGS = [
@@ -61,27 +69,67 @@ class ModelPickerScreen(ModalScreen):
         Binding("escape", "cancel", "Cancel"),
     ]
 
+    PullHint = "↓↓ pull:"
+
     def __init__(self, current_brain: str | None, current_reasoning: str):
         super().__init__()
         self.current_brain = current_brain
         self.reasoning_index = max(0, REASONING_LEVELS.index(current_reasoning)
                                   if current_reasoning in REASONING_LEVELS else 1)
+        self._all_rows: list[dict] = self._gather_rows()
+
+    def _gather_rows(self) -> list[dict]:
+        rows = []
+        for b in list_brains():
+            rows.append({"kind": "configured", "label": f"✓ {b['name']} · {b.get('model', '?')}",
+                         "brain": b["name"]})
+        try:
+            from .models_catalog import catalog
+            cat = catalog()
+            have = {b.get("model") for b in list_brains()}
+            for provider in ("nim", "ollama"):
+                for m in sorted(cat.get(provider, [])):
+                    if m not in have:
+                        rows.append({"kind": "catalog", "provider": provider, "model": m,
+                                     "label": f"  {provider}:{m}"})
+            for m in cat.get("ollama_installable", []):
+                rows.append({"kind": "pull", "provider": "ollama", "model": m,
+                             "label": f"{self.PullHint} ollama:{m}"})
+        except Exception:
+            pass
+        return rows
 
     def compose(self) -> ComposeResult:
         with Vertical(id="picker"):
-            yield Static("🐾  pick a brain, nya~", id="picker_title")
-            ol = OptionList(id="model_list")
-            brains = list_brains()
-            for b in brains:
-                label = f"{b['name']} · {b.get('model', '?')}"
-                ol.add_option(label)
-                if b["name"] == self.current_brain:
-                    ol.highlighted = len(ol.options) - 1
-            yield ol
+            yield Static("🐾  pick a brain — type to filter (NIM + Ollama, all models)", id="picker_title")
+            yield Input(placeholder="filter…", id="model_filter")
+            yield OptionList(id="model_list")
             yield Static("", id="reasoning_row")
 
     def on_mount(self) -> None:
+        self._refresh_options()
         self._update_reasoning_row()
+        self.set_timer(0.05, lambda: self.query_one("#model_filter", Input).focus())
+
+    def _refresh_options(self, filter_text: str = "") -> None:
+        ol = self.query_one("#model_list", OptionList)
+        ol.clear_options()
+        self._shown: list[dict] = []
+        needle = filter_text.strip().lower()
+        for row in self._all_rows:
+            if needle and needle not in row["label"].lower():
+                continue
+            self._shown.append(row)
+            ol.add_option(row["label"])
+        if self._shown:
+            for i, row in enumerate(self._shown):
+                if row.get("brain") == self.current_brain:
+                    ol.highlighted = i
+                    break
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "model_filter":
+            self._refresh_options(event.value)
 
     def _update_reasoning_row(self) -> None:
         level = REASONING_LEVELS[self.reasoning_index]
@@ -100,21 +148,22 @@ class ModelPickerScreen(ModalScreen):
         self.dismiss(None)
 
     def on_option_list_option_selected(self, event) -> None:
-        brains = list_brains()
-        idx = event.option_index if hasattr(event, "option_index") else None
-        # Textual OptionList event: OptionList.OptionSelected has option_id or index
         try:
             index = event.option_index
         except AttributeError:
-            ol = self.query_one("#model_list", OptionList)
-            index = ol.highlighted
-        if index is not None and 0 <= index < len(brains):
-            self.dismiss({
-                "brain": brains[index]["name"],
-                "reasoning": REASONING_LEVELS[self.reasoning_index],
-            })
-        else:
+            index = self.query_one("#model_list", OptionList).highlighted
+        if index is None or not (0 <= index < len(self._shown)):
             self.dismiss(None)
+            return
+        row = self._shown[index]
+        result = {"reasoning": REASONING_LEVELS[self.reasoning_index]}
+        if row["kind"] == "configured":
+            result["brain"] = row["brain"]
+        elif row["kind"] == "catalog":
+            result["provider_model"] = (row["provider"], row["model"])
+        else:  # pull
+            result["pull"] = row["model"]
+        self.dismiss(result)
 
 
 # ── main app ─────────────────────────────────────────────────────
@@ -174,6 +223,7 @@ class AikoTUI(App):
         Binding("ctrl+4", "tab_status", "Status", priority=True),
         Binding("ctrl+v", "pager", "Pager", priority=True),
         Binding("v", "pager", "Pager/copy", priority=True),
+        Binding("ctrl+m", "toggle_mouse", "Mouse copy", priority=True),
         Binding("q", "quit", "Quit"),
         Binding("1", "tab_chat", "Chat", priority=True),
         Binding("2", "tab_sessions", "Sessions", priority=True),
@@ -312,13 +362,23 @@ class AikoTUI(App):
 
     # ── brain / chat ───────────────────────────────────────────
 
-    def _set_brain(self, name: str) -> None:
+    def _set_brain(self, name: str, reasoning: str | None = None) -> None:
         try:
             if not self.orchestrator:
                 self.orchestrator = Orchestrator(brain=Brain(name=name),
                                                 backend=self.backend)
             else:
                 self.orchestrator.switch_brain(name)
+            if reasoning and self.orchestrator:
+                self.orchestrator.brain.set_reasoning(reasoning)
+            # persist last-used brain so next launch restores it
+            try:
+                from .config import load_config, save_config
+                cfg = load_config()
+                cfg["default_brain"] = name
+                save_config(cfg)
+            except Exception:
+                pass
             self._update_brain_label()
         except RuntimeError as e:
             self.query_one("#brain_label", Static).update(f"🐾 [red]{e}[/red]")
@@ -368,15 +428,32 @@ class AikoTUI(App):
             current_reason = getattr(self.orchestrator.brain, "reasoning", "medium") if self.orchestrator else "medium"
             picker = ModelPickerScreen(current, current_reason)
             result = await self.push_screen_wait(picker)
-            if result:
-                self.orchestrator.switch_brain(result["brain"],
-                                               reasoning=result["reasoning"])
-                select = self.query_one("#brain_select", Select)
-                select.value = result["brain"]
-                self._update_brain_label()
-                log.write(f"[pink]brain switched →[/pink] "
-                          f"[b]{self.orchestrator.brain.describe()}[/b] "
-                          f"[gray]· reasoning: {result['reasoning']}[/gray] nyaa~")
+            if not result:
+                return
+            if "pull" in result:
+                await self._ollama_pull(result["pull"])
+                return
+            if "provider_model" in result:
+                provider, model = result["provider_model"]
+                try:
+                    from .brain import Brain as _B
+                    new_brain = _B.from_provider_model(provider, model)
+                    new_brain.set_reasoning(result["reasoning"])
+                    assert self.orchestrator is not None
+                    self.orchestrator.brain = new_brain
+                    self._update_brain_label()
+                    log.write(f"[pink]brain (ad-hoc) →[/pink] [b]{new_brain.describe()}[/b] "
+                              f"[gray]· reasoning: {result['reasoning']}[/gray] nyaa~")
+                except Exception as e:
+                    log.write(f"[red]can't adopt {provider}:{model}: {e}[/red]")
+                return
+            self._set_brain(result["brain"], reasoning=result["reasoning"])
+            select = self.query_one("#brain_select", Select)
+            select.value = result["brain"]
+            brain = self.orchestrator.brain if self.orchestrator else None
+            log.write(f"[pink]brain switched →[/pink] "
+                      f"[b]{brain.describe() if brain else result['brain']}[/b] "
+                      f"[gray]· reasoning: {result['reasoning']}[/gray] nyaa~")
         elif cmd == "/plan":
             if not arg:
                 log.write("[red]/plan needs your braindump, nya — "
@@ -901,6 +978,34 @@ class AikoTUI(App):
         """Remove Textual/Rich markup tags from extracted log text."""
         import re as _re
         return _re.sub(r"\[/?[a-z0-9 #]+\]", "", text)
+
+    def action_toggle_mouse(self) -> None:
+        """Toggle terminal mouse capture OFF/ON. OFF = native terminal text
+        selection/copy works (terminal handles drag); ON = Textual gets it back.
+
+        Textual 8.x has no public runtime toggle, so we write the raw ANSI
+        mouse-reporting sequences to the terminal ourselves."""
+        self._mouse_off = not getattr(self, "_mouse_off", False)
+        try:
+            import os, sys
+            sysout = sys.__stdout__ or sys.stdout
+            if sysout is None:
+                raise RuntimeError("no writable stdout")
+            # X10 / normal / button-event / any-event / SGR-extended mouse
+            seqs = ["\x1b[?9h", "\x1b[?1000h", "\x1b[?1002h",
+                    "\x1b[?1003h", "\x1b[?1006h"]
+            if self._mouse_off:
+                out = "".join(s[:-1] + "l" for s in seqs)  # ?XNh → ?XNl
+                msg = "mouse capture OFF — drag to copy · ctrl+m to restore"
+            else:
+                out = "".join(seqs[1:2] + seqs[4:5])       # re-enable 1000+1006
+                msg = "mouse capture ON"
+            sysout.write(out)
+            sysout.flush()
+            self.notify(msg)
+        except Exception:
+            self.notify("toggle failed — hold Option (macOS) or Shift "
+                        "while dragging to bypass mouse capture")
 
     # ── tabs ────────────────────────────────────────────────────
 
