@@ -124,6 +124,11 @@ class AikoTUI(App):
     #chat_log { height: 1fr; border: round #d75fd7; }
     #chat_input { dock: bottom; border: tall #d75fd7; }
     #chat_input:focus { border: tall #ff87ff; }
+    #stream_view {
+        height: auto; max-height: 14; border-left: thick #d75fd7;
+        padding: 0 1; margin: 0 1; display: none; color: #87d7ff;
+    }
+    #stream_view.on { display: block; }
     #brain_bar { dock: top; height: 3; }
     #brain_label { color: #d75fd7; width: auto; padding: 0 1; }
     #session_list { height: 45%; border: round #d75fd7; }
@@ -169,6 +174,7 @@ class AikoTUI(App):
                         allow_blank=True, id="brain_select", prompt="brains…")
                     yield Button("reset 🐾", id="reset_btn")
                 yield RichLog(id="chat_log", wrap=True, markup=True)
+                yield Static("", id="stream_view")
                 yield Input(placeholder="message Aiko… (Enter to send, /help for commands)",
                             id="chat_input")
             with TabPane("📋 Sessions", id="sessions"):
@@ -372,19 +378,7 @@ class AikoTUI(App):
             log.write("[i gray](Aiko is still thinking, one moment~)[/i gray]")
             return
         self.busy = True
-        input_box = self.query_one("#chat_input", Input)
-        input_box.placeholder = "Aiko is planning… ฅ(˘ω˘ )ฅ"
-
-        def run():
-            try:
-                reply = self.orchestrator.plan(braindump)
-                self.call_from_thread(self._write_reply, reply)
-            except Exception as e:
-                self.call_from_thread(self._write_reply, f"[red]mrrp, error: {e}[/red]")
-            finally:
-                self.call_from_thread(self._chat_done)
-
-        threading.Thread(target=run, daemon=True).start()
+        self._run_stream(braindump, plan=True)
 
     # ── chat with the agent ─────────────────────────────────────
 
@@ -401,18 +395,73 @@ class AikoTUI(App):
             log.write("[i gray](Aiko is still thinking, one moment~)[/i gray]")
             return
         self.busy = True
-        input_box.placeholder = "Aiko is thinking… ฅ(>﹏<)ฅ"
+        self._run_stream(text)
+
+    # ── streaming runner: paints thinking / tools / text live ───
+
+    def _run_stream(self, text: str, plan: bool = False) -> None:
+        """Iterate the orchestrator's event stream in a worker thread."""
+        input_box = self.query_one("#chat_input", Input)
+        input_box.placeholder = ("Aiko is planning… ฅ(˘ω˘ )ฅ" if plan
+                                 else "Aiko is thinking… ฅ(>﹏<)ฅ")
+        self._stream_think = ""
+        self._stream_text = ""
+        self._stream_tools: list[str] = []
+
+        orch = self.orchestrator
+        if orch is None:
+            return
 
         def run():
             try:
-                reply = self.orchestrator.step(text)
-                self.call_from_thread(self._write_reply, reply)
+                gen = (orch.plan_stream(text) if plan
+                       else orch.step_stream(text))
+                for evt in gen:
+                    self.call_from_thread(self._on_stream_event, evt)
             except Exception as e:
                 self.call_from_thread(self._write_reply, f"[red]mrrp, error: {e}[/red]")
             finally:
                 self.call_from_thread(self._chat_done)
 
         threading.Thread(target=run, daemon=True).start()
+
+    @staticmethod
+    def _esc(text: str) -> str:
+        return text.replace("[", "\\[")
+
+    def _on_stream_event(self, evt: dict) -> None:
+        try:
+            sv = self.query_one("#stream_view", Static)
+        except Exception:
+            return
+        kind = evt.get("type")
+        if kind == "thinking":
+            self._stream_think += evt.get("delta", "")
+        elif kind == "text":
+            self._stream_text += evt.get("delta", "")
+        elif kind == "tool":
+            self._stream_tools.append(evt.get("name", "?"))
+        elif kind == "tool_result":
+            if self._stream_tools:
+                self._stream_tools[-1] += " ✓"
+        elif kind == "reply":
+            self.query_one("#chat_log", RichLog).write(
+                f"[b pink]Aiko[/b pink]  {evt.get('content', '')}")
+            self._stream_think = self._stream_text = ""
+            self._stream_tools = []
+            sv.remove_class("on")
+            sv.update("")
+            return
+        lines = []
+        if self._stream_think:
+            lines.append(f"[i dim]💭 {self._esc(self._stream_think[-280:])}[/i dim]")
+        for t in self._stream_tools:
+            lines.append(f"[b blue]🔧 {self._esc(t)}[/b blue]")
+        if self._stream_text:
+            lines.append(f"[b pink]Aiko[/b pink]  {self._esc(self._stream_text)}")
+        if lines:
+            sv.add_class("on")
+            sv.update("\n".join(lines))
 
     def _write_reply(self, reply: str) -> None:
         self.query_one("#chat_log", RichLog).write(
@@ -423,6 +472,9 @@ class AikoTUI(App):
         try:
             self.query_one("#chat_input", Input).placeholder = \
                 "message Aiko… (Enter to send, /help for commands)"
+            sv = self.query_one("#stream_view", Static)
+            sv.remove_class("on")
+            sv.update("")
         except Exception:
             pass
 

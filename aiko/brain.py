@@ -147,3 +147,193 @@ class Brain:
                 tool_calls.append({"name": fn.get("name", ""), "arguments": args})
             return {"content": msg.get("content") or "", "tool_calls": tool_calls}
         raise RuntimeError(f"all models unavailable ({last_err}) — provider overloaded, try /model to switch, nya")
+
+
+class _StreamState:
+    """Accumulates streaming deltas: thinking, text, tool-call fragments.
+
+    Handles both provider styles:
+    - reasoning deltas: `reasoning_content` / `reasoning` fields (NIM etc.)
+    - inline think tags: content wrapped in  (GLM/Qwen style)
+    - tool-call fragments keyed by index, arguments arrive in pieces
+    """
+
+    def __init__(self):
+        self.thinking = ""
+        self.text = ""
+        self.in_think_tag = False
+        self.tools: dict[int, dict] = {}
+
+    _THINK_OPEN = "<" + "think>"    # assembled from parts so transports can't eat the tag
+    _THINK_CLOSE = "<" + "/think>"
+
+    def _absorb(self, chunk: str) -> tuple[str, str]:
+        """Split think-tagged content → (think_delta, text_delta)."""
+        think = text = ""
+        buf = chunk
+        while buf:
+            if not self.in_think_tag and self._THINK_OPEN in buf:
+                plain, _, buf = buf.partition(self._THINK_OPEN)
+                text += plain
+                self.in_think_tag = True
+            elif self.in_think_tag and self._THINK_CLOSE in buf:
+                thought, _, buf = buf.partition(self._THINK_CLOSE)
+                think += thought
+                self.in_think_tag = False
+                buf = buf.lstrip("\n")
+            else:
+                if self.in_think_tag:
+                    think += buf
+                else:
+                    text += buf
+                buf = ""
+        return think, text
+
+    def feed_delta(self, delta: dict) -> dict | None:
+        """Consume one delta → an event dict, or None for nothing visible."""
+        r = delta.get("reasoning_content") or delta.get("reasoning")
+        if r:
+            self.thinking += r
+            return {"type": "thinking", "delta": r}
+        for tc in delta.get("tool_calls") or []:
+            idx = tc.get("index", 0)
+            slot = self.tools.setdefault(idx, {"name": "", "arguments": ""})
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["name"] += fn["name"]
+            if fn.get("arguments"):
+                slot["arguments"] += fn["arguments"]
+        c = delta.get("content")
+        if c:
+            think, text = self._absorb(c)
+            if think:
+                self.thinking += think
+                return {"type": "thinking", "delta": think}
+            if text:
+                self.text += text
+                return {"type": "text", "delta": text}
+        return None
+
+    def feed_sse(self, line: str) -> dict | None:
+        """Consume one SSE line from a chat-completions stream."""
+        if not line or not line.startswith("data:"):
+            return None
+        payload = line[5:].strip()
+        if not payload or payload == "[DONE]":
+            return None
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            return None
+        choices = chunk.get("choices") or []
+        if not choices:
+            return None
+        return self.feed_delta(choices[0].get("delta") or {})
+
+    def final(self) -> dict:
+        """Same shape as Brain.complete(): {content, tool_calls}."""
+        calls = []
+        for idx in sorted(self.tools):
+            slot = self.tools[idx]
+            args = slot["arguments"] or "{}"
+            try:
+                args = json.loads(args)
+            except json.JSONDecodeError:
+                args = {"_raw": args}
+            calls.append({"name": slot["name"], "arguments": args})
+        return {"content": self.text, "tool_calls": calls}
+
+
+# ── streaming extension ──────────────────────────────────────────
+def _brain_stream_openai(self, messages, tools):
+    """SSE stream → yields thinking/text events, then one final event."""
+    body = {"model": self.model, "messages": messages,
+            "max_tokens": 4096, "temperature": 0.6, "stream": True}
+    if tools:
+        body["tools"] = tools
+        body["tool_choice"] = "auto"
+    candidates = [self.model] + self._sibling_models()
+    last_err = None
+    for model in candidates:
+        body["model"] = model
+        try:
+            with httpx.stream("POST", f"{self.base_url}/chat/completions",
+                              headers={"Authorization": f"Bearer {self.api_key}"},
+                              json=body, timeout=180) as r:
+                if r.status_code in (429, 500, 502, 503):
+                    last_err = f"{model}: {r.status_code}"
+                    continue
+                r.raise_for_status()
+                state = _StreamState()
+                for line in r.iter_lines():
+                    evt = state.feed_sse(line)
+                    if evt:
+                        yield evt
+                final = state.final()
+                if not final["tool_calls"] and not final["content"]:
+                    # some providers (NIM/nemotron) stream empty on later
+                    # tool rounds — heal the turn with a non-streaming retry
+                    try:
+                        healed = self._complete_openai(messages, tools)
+                    except Exception:
+                        healed = {"content": "", "tool_calls": []}
+                    if healed["content"] or healed["tool_calls"]:
+                        if healed["content"]:
+                            yield {"type": "text", "delta": healed["content"]}
+                        yield {"type": "final", **healed}
+                        return
+                    last_err = f"{model}: empty stream"
+                    continue  # dead model → try a sibling
+                yield {"type": "final", **final}
+                return
+        except httpx.HTTPError as e:
+            last_err = f"{model}: {e}"
+            continue
+    raise RuntimeError(f"all models unavailable ({last_err}) — try /model to switch, nya")
+
+
+def _brain_stream_ollama(self, messages, tools):
+    """Ollama /api/chat NDJSON stream → same event vocabulary."""
+    body = {"model": self.model, "messages": messages, "stream": True}
+    if tools:
+        body["tools"] = tools
+    tool_calls = []
+    text = ""
+    with httpx.stream("POST", f"{self.endpoint}/api/chat", json=body, timeout=300) as r:
+        r.raise_for_status()
+        for line in r.iter_lines():
+            if not line.strip():
+                continue
+            try:
+                chunk = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            msg = chunk.get("message", {})
+            th = msg.get("thinking")
+            if th:
+                yield {"type": "thinking", "delta": th}
+            c = msg.get("content", "")
+            if c:
+                text += c
+                yield {"type": "text", "delta": c}
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function", {})
+                args = fn.get("arguments", {})
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {"_raw": args}
+                tool_calls.append({"name": fn.get("name", ""), "arguments": args})
+    yield {"type": "final", "content": text, "tool_calls": tool_calls}
+
+
+def _brain_complete_stream(self, messages, tools=None):
+    """Yield events: thinking | text | final. Same result shape as complete()."""
+    if self.type == "ollama":
+        yield from _brain_stream_ollama(self, messages, tools)
+    else:
+        yield from _brain_stream_openai(self, messages, tools)
+
+
+Brain.complete_stream = _brain_complete_stream  # type: ignore[attr-defined]

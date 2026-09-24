@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>docs · aiko</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐾</text></svg>">
+</head>
+<body>
+<nav class="nav"><a class="logo" href="index.html"><span class="cat">🐾</span> aiko</a><a href="index.html">home</a><a href="install.html">install</a><a href="docs.html" class="active">docs</a><a class="cta" href="install.html">get started</a></nav>
+
+<div class="wrap docs-body">
+  <section class="section">
+    <h2>aiko <span class="accent">docs</span></h2>
+    <p class="lead">Everything Aiko speaks — config, commands, slash commands, and the daemon.</p>
+
+    <h3 id="config">config (~/.aiko/config.yaml)</h3>
+    <pre><code>brains:
+  - name: my-brain
+    type: openai            # or: ollama
+    model: nvidia/nemotron-3-super-120b-a12b
+    base_url: https://integrate.api.nvidia.com/v1
+    api_key: ${NIM_API_KEY}     # $ENV expansion supported
+
+servers:                     # list — local:, server_one:, server_two: …
+  - name: server_one
+    url: https://aikod.example.com
+    auth: nova_jwt           # or: token
+    identifier: you@mail.com
+
+agents:                      # local CLI agents she can spawn
+  - name: hermes
+    command: hermes
+    one_shot: [chat, -q, "{{prompt}}"]
+
+context_providers:           # docs attached to dispatches
+  - name: my-vault
+    type: http_docs
+    base_url: https://vault.example.com
+    headers: {X-Vault-Secret: ${VAULT_TOKEN}}
+    lazy_attach: [Agents/Context Router.md]
+
+mcp_servers:                 # Aiko's own MCP client
+  vault:
+    url: https://vault-mcp.example.com/mcp
+    headers: {X-Vault-Secret: ${VAULT_TOKEN}}</code></pre>
+
+    <h3>slash commands</h3>
+    <table>
+      <tr><th>command</th><th>what it does</th></tr>
+      <tr><td><code>/model</code></td><td>interactive picker — ↑↓ brain, ←→ reasoning, Enter to confirm</td></tr>
+      <tr><td><code>/new</code></td><td>fresh conversation (alias: <code>/reset</code>)</td></tr>
+      <tr><td><code>/plan <dump></code></td><td>planning mode — organizes a braindump, dispatches nothing</td></tr>
+      <tr><td><code>/targets</code></td><td>list dispatch targets + health</td></tr>
+      <tr><td><code>/status</code></td><a href="docs.html#status">status overview</a></td></tr>
+      <tr><td><code>/clear</code></td><td>clear the chat log</td></tr>
+      <tr><td><code>/help</code></td><td>all commands</td></tr>
+    </table>
+
+    <h3>CLI</h3>
+    <table>
+      <tr><th>command</th><th>what it does</th></tr>
+      <tr><td><code>aiko</code></td><td>the TUI — chat, sessions, concord, status</td></tr>
+      <tr><td><code>aiko config</code></td><td>guided config wizard</td></tr>
+      <tr><td><code>aiko config --edit</code></nd><td>raw YAML in $EDITOR</td></tr>
+      <tr><td><code>aiko goal "<goal>"</code></td><td>one-shot dispatch (no TUI)</td></tr>
+      <tr><td><code>aiko routing</code></td><td>daemon routing log (server mode)</td></tr>
+      <tr><td><code>aiko whoami</code></td><td>who the daemon thinks you are</td></tr>
+    </table>
+
+    <h3>the daemon (aikod)</h3>
+    <p>Run on a server to accept dispatches from your local Aiko. It exposes sessions, transcripts, steer messages, health. Auth: Nova JWT or bearer token. The repo ships a systemd unit (<code>aikod.service</code>).</p>
+
+    <h3 id="status">status tab & /status</h3>
+    <p>Brains, servers, agents, MCP servers, session counts — all in one glance. Runs every 5s while the status tab is active.</p>
+
+    <h3>philosophy</h3>
+    <ul>
+      <li><b>local-first:</b> your config, your keys, your machines. No cloud required — any OpenAI-compatible endpoint works.</li>
+      <li><b>lazy context:</b> inject indexes, not libraries. Aiko reads a small router doc; deeper docs get fetched on demand.</li>
+      <li><b>competence first, catgirl always:</b> she gets work done, then purrs about it.</li>
+    </ul>
+  </section>
+</div>
+
+<footer>
+  <span class="cat">ฅ^•ﻌ•^ฅ</span> aiko · the agent orchestrator for all your AI agents<br>
+  MIT licensed · <a href="https://github.com/eRamos86/aiko">github.com/eRamos86/aiko</a>
+</footer>
+</body>
+</html>

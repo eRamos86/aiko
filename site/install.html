@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>install · aiko</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🐾</text></svg>">
+</head>
+<body>
+<nav class="nav"><a class="logo" href="index.html"><span class="cat">🐾</span> aiko</a><a href="index.html">home</a><a href="install.html" class="active">install</a><a href="docs.html">docs</a><a class="cta" href="install.html">get started</a></nav>
+
+<div class="wrap docs-body">
+  <section class="section">
+    <h2>adopt <span class="accent">Aiko</span></h2>
+    <p class="lead">Two pieces: <code>aiko</code> (local TUI client, this machine) and optionally <code>aikod</code> (daemon, on a server) — so she can orchestrate agents on your other machines too.</p>
+
+    <h3>requirements</h3>
+    <ul>
+      <li>Python 3.11+ (3.9 won't cut it, nya)</li>
+      <li>a terminal that loves you back</li>
+      <li>(optional) an OpenAI-compatible API key — NIM, OpenRouter, local llama.cpp, or Ollama</li>
+    </ul>
+
+    <h3>1 · install the client</h3>
+    <pre><code>pipx install git+https://github.com/eRamos86/aiko</code></pre>
+    <p>or with pip: <code>pip install git+https://github.com/eRamos86/aiko</code></p>
+
+    <h3>2 · configure her</h3>
+    <p>Walk through every section with the guided wizard:</p>
+    <pre><code>aiko config</code></pre>
+    <p>The wizard covers brains (models), servers (aikod daemons), agents (local CLIs), context providers (docs injection), and MCP servers. Prefer raw YAML? <code>aiko config --edit</code>.</p>
+
+    <h3>3 · say hi</h3>
+    <pre><code>aiko</code></pre>
+    <p>The TUI boots with the catgirl loading screen, four tabs (chat · sessions · concord · status), and she greets you. Try:</p>
+    <pre><code>you: hey aiko, what can you do?
+you: /model          # pick a brain + reasoning interactively
+you: /plan I want to add auth to my app...   # braindump mode
+you: /new            # fresh conversation</code></pre>
+
+    <h3>4 · (optional) server-side daemon</h3>
+    <p>Install <code>aikod</code> on any server to dispatch work to ITS agents:</p>
+    <pre><code>pipx install git+https://github.com/eRamos86/aiko
+aikod serve            # starts the daemon (systemd unit in the repo)</pre></code>
+    <p>Then add it in <code>aiko config</code> → servers → daemon URL + auth.</p>
+
+    <h3>uninstall</h3>
+    <p><code>pipx uninstall aiko</code> — she'll pretend she isn't sad. She is. 🐾</p>
+  </section>
+</div>
+
+<footer>
+  <span class="cat">ฅ^•ﻌ•^ฅ</span> aiko · the agent orchestrator for all your AI agents<br>
+  MIT licensed · <a href="https://github.com/eRamos86/aiko">github.com/eRamos86/aiko</a>
+</footer>
+</body>
+</html>

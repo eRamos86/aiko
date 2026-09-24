@@ -108,10 +108,8 @@ class Orchestrator:
             self.brain.set_reasoning(reasoning)
         return self.brain.describe()
 
-    def plan(self, braindump: str) -> str:
-        """Planning mode: organize a braindump WITHOUT dispatching anything.
-        The reply is instructions Aiko can act on later (dispatch, store, etc)."""
-        plan_prompt = (
+    def _plan_prompt(self, braindump: str) -> str:
+        return (
             "# Planning mode\n"
             "Ace just braindumped. Organize it into a clear, structured plan. "
             "DO NOT call any tools — nothing gets dispatched from planning mode. "
@@ -121,7 +119,53 @@ class Orchestrator:
             "End with: 'say the word and I'll dispatch any of these, nya~'\n\n"
             f"# Braindump\n{braindump}"
         )
-        return self.step(plan_prompt)
+
+    def plan(self, braindump: str) -> str:
+        """Planning mode: organize a braindump WITHOUT dispatching anything.
+        The reply is instructions Aiko can act on later (dispatch, store, etc)."""
+        return self.step(self._plan_prompt(braindump))
+
+    def plan_stream(self, braindump: str):
+        """Streaming planning mode — same event vocabulary as step_stream."""
+        yield from self.step_stream(self._plan_prompt(braindump))
+
+    def step_stream(self, user_text: str, max_tool_rounds: int = 12):
+        """Streaming variant of step(): yields thinking/text/tool events,
+        ends with a {type: reply} event. Behavior matches step()."""
+        self.history.append({"role": "user", "content": user_text})
+        for _ in range(max_tool_rounds):
+            final = None
+            for evt in self.brain.complete_stream(self.history, tools=_tool_defs()):  # type: ignore[attr-defined]
+                if evt.get("type") == "final":
+                    final = evt
+                    break
+                yield evt
+            if final is None:
+                final = {"content": "", "tool_calls": []}
+            calls = final.get("tool_calls") or []
+            if not calls:
+                reply = (final.get("content") or "").strip()
+                self.history.append({"role": "assistant", "content": reply})
+                yield {"type": "reply", "content": reply}
+                return
+            self.history.append({
+                "role": "assistant",
+                "content": final.get("content") or "",
+                "tool_calls": [
+                    {"id": f"call-{i}", "type": "function",
+                     "function": {"name": c["name"],
+                                  "arguments": json.dumps(c["arguments"])}}
+                    for i, c in enumerate(calls)
+                ],
+            })
+            for i, c in enumerate(calls):
+                yield {"type": "tool", "name": c["name"]}
+                result = self._execute(c["name"], c["arguments"])
+                yield {"type": "tool_result", "name": c["name"],
+                       "result": result[:200]}
+                self.history.append({"role": "tool", "tool_call_id": f"call-{i}",
+                                     "content": result})
+        yield {"type": "reply", "content": "(hit the tool-round limit, nya…)"}
 
     def _execute(self, name: str, args: dict) -> str:
         # MCP tools first (mcp_<server>_<tool>) — config-driven, no code change needed to add more
