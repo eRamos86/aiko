@@ -124,7 +124,12 @@ def availability(tool: str) -> float:
 
 
 def rank_tools(task_shape: str, usage_snapshot=None) -> list[dict]:
-    """Ranked candidates for a task shape: tool, score, reasoning, why."""
+    """Ranked candidates for a task shape: tool, score, reasoning, why.
+
+    Score = capability_floor × usage_availability + learned_modifier.
+    The modifier is the feedback loop: real outcomes drift the ranking
+    (promote proven tools, demote flaky ones) without any token spend.
+    """
     caps = load_caps().get("tools", DEFAULT_CAPS)
     rows = []
     for tool, floors in caps.items():
@@ -133,13 +138,22 @@ def rank_tools(task_shape: str, usage_snapshot=None) -> list[dict]:
         if usage_snapshot and tool in usage_snapshot:
             # external snapshot (e.g. from the daemon) can override
             avail = usage_snapshot[tool]
-        score = round(floor * avail, 3)
+        try:
+            from .feedback import modifier_for
+            fb = modifier_for(tool, task_shape)
+        except Exception:
+            fb = 0.0
+        score = round(max(0.0, min(1.0, floor * avail + fb)), 3)
         if score <= 0:
             continue
+        why = f"floor={floor} × availability={avail:.2f}"
+        if fb:
+            why += f" {'+' if fb > 0 else ''}{fb} learned"
+        why += f" → {score}"
         rows.append({
             "tool": tool, "score": score,
-            "floor": floor, "availability": avail,
-            "reasoning": f"floor={floor} × availability={avail:.2f} → {score}",
+            "floor": floor, "availability": avail, "feedback": fb,
+            "reasoning": why,
         })
     rows.sort(key=lambda r: r["score"], reverse=True)
     return rows

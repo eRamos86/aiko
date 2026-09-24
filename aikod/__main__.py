@@ -102,6 +102,14 @@ def orchestrator_loop(db_path, adapters, poll_interval: float = 5.0):
                         (task_id,))
                     append(conn2, task_id, "task.orchestrated",
                            {"reply": reply[:2000]})
+                    # learning: fold this outcome into the router modifiers
+                    try:
+                        from .learning import learn_observed
+                        delta = learn_observed(db_path, task_id, reply)
+                        if delta:
+                            append(conn2, task_id, "task.learned", delta)
+                    except Exception:
+                        pass
                 except Exception as e:
                     print(f"[orchestrator] {task_id}: {e}", flush=True)
         except Exception as e:

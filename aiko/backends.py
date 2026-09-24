@@ -73,6 +73,7 @@ class LocalBackend(Backend):
         self.agents = {a["name"]: a for a in self.cfg.get("agents", [])}
         self._procs: dict[str, subprocess.Popen] = {}
         self._tasks: dict[str, dict] = {}
+        self._learned: set[str] = set()
 
     def list_targets(self) -> list[dict]:
         return [{"target": "local", "agents": sorted(self.agents.keys())}]
@@ -113,8 +114,23 @@ class LocalBackend(Backend):
         if not proc:
             return {"error": "unknown task"}
         alive = proc.poll() is None
-        return {"task_id": task_id, "state": "running" if alive else "completed",
-                "agent": self._tasks[task_id]["agent"]}
+        status = {"task_id": task_id, "state": "running" if alive else "completed",
+                  "agent": self._tasks[task_id]["agent"]}
+        # learning: on completion, fold the outcome into the feedback ledger
+        if not alive and task_id not in self._learned:
+            self._learned.add(task_id)
+            try:
+                from .feedback import record_outcome
+                tr = Path.home() / ".aiko" / "transcripts" / f"{task_id}.log"
+                ok = True
+                if tr.exists():
+                    low = tr.read_text(errors="replace").lower()
+                    ok = not any(m in low for m in (
+                        "error:", "failed", "traceback", "hit the tool-round"))
+                record_outcome(self._tasks[task_id]["agent"], "implement", ok)
+            except Exception:
+                pass
+        return status
 
     def list_sessions(self) -> list[dict]:
         sessions = []
