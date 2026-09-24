@@ -5,7 +5,6 @@ from pathlib import Path
 
 import jwt as pyjwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
-from .docs_auditor import run_audit
 
 from .db import connect, hash_token
 from .events import append, get_for_session
@@ -194,10 +193,19 @@ def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
         auto_fix: bool = Query(True),
         write_report: bool = Query(True),
     ):
-        """Nightly/on-demand docs audit sweep. Server-side only."""
+        """Proxy to the standalone docs-auditor service (port 4012).
+        The auditor is NOT part of aikod — this is a convenience route for
+        clients that already hold Nova JWTs."""
+        import httpx as _hx
         try:
-            summary = run_audit(max_docs=max_docs, auto_fix=auto_fix, write_report=write_report)
-            return summary
+            r = _hx.get("http://127.0.0.1:4012/audit",
+                        params={"max_docs": max_docs, "auto_fix": auto_fix,
+                                "write_report": write_report},
+                        timeout=_hx.Timeout(600, connect=5))
+            return r.json()
+        except _hx.ConnectError:
+            return {"error": "docs-auditor service not running "
+                             "(docsauditor serve on port 4012)"}
         except Exception as e:
             return {"error": str(e)}
 
