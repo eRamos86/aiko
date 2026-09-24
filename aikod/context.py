@@ -37,23 +37,25 @@ def search(query: str, limit: int = 5) -> list[dict]:
 
 
 def assemble_bundle(task_spec: str, hints: list[str] | None = None) -> str:
-    """Assemble the context bundle for a task: spec + retrieved vault slices.
+    """Assemble the context bundle for a task — PROGRESSIVE (ADR-014).
 
-    v0.1 retrieval: keyword search off the spec + any explicit hint paths
-    (project hub, protocol docs). No embeddings (Q10).
+    Tier 0 (always): task spec + Context Router (~2KB) — the map that says
+      what to load and how to fetch it (MCP read_note/search_notes, or the
+      REST API). NOTHING else rides along uninvited.
+    Tier 1 (agent-driven): the agent reads the router and lazily fetches
+      what the task actually needs — a named project's Platform/<P>/ hub,
+      operating rules, protocols — through its vault MCP.
+    Explicit `hints` (caller-supplied paths) are still honored for cases
+      where the dispatcher already knows what's relevant.
     """
     parts = [f"# Task\n{task_spec}\n"]
 
-    # Always include the universal layer (small, high-value, D19):
-    # hub, shared context, context router, and the agent operating system.
-    for must in ("Agents/Agents.md", "Agents/Shared-Context.md",
-                 "Agents/Context Router.md",
-                 "Agents/System/Agent Operating System.md"):
-        content = fetch_doc(must)
-        if content:
-            parts.append(f"---\n# Vault: {must}\n{content}\n")
+    # Tier 0: the router is the universal layer's *index* — small on purpose.
+    router = fetch_doc("Agents/Context Router.md")
+    if router:
+        parts.append(f"---\n# Vault: Agents/Context Router.md\n{router}\n")
 
-    # Hinted docs (e.g. the project's hub for the repo being worked on).
+    # Caller-known relevant docs (explicit hints) — never guessed.
     for hint in hints or []:
         content = fetch_doc(hint)
         if content:
