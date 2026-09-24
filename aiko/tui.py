@@ -407,6 +407,19 @@ class AikoTUI(App):
                     raw = " · ".join(f"{u}:{n}" for u, n in sorted(info["raw_24h"].items()))
                     log.write(f"    [dim]24h raw: {raw}[/dim]")
             log.write("[dim]set caps: aiko usage-set <key> <unit> <cap> <window>[/dim]")
+        elif cmd == "/models":
+            shape = text[len("/models"):].strip() or "research"
+            from .models_catalog import catalog, rank_models
+            cat = catalog()
+            total = sum(len(v) for v in cat.values())
+            log.write(f"[b pink]🧠 model catalog[/b pink]  {total} models across "
+                      f"{', '.join(f'{k}:{len(v)}' for k, v in cat.items())}")
+            log.write(f"[b pink]top for {shape}[/b pink]")
+            for row in rank_models(shape, limit=8):
+                fb = f" [mint]{row['feedback']:+.2f}✓learned[/mint]" if row["feedback"] else ""
+                log.write(f"  {row['score']:.2f}  [sky]{row['model'][:44]}[/sky]"
+                          f"  [dim]{row['why']}[/dim]{fb}")
+            log.write("[dim]rankings learn from outcomes; /model picks stay too, nya[/dim]")
         elif cmd == "/recommend":
             arg = text[len("/recommend"):].strip()
             if not arg:

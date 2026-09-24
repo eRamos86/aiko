@@ -165,6 +165,9 @@ def recommend(text: str, declared_type: str | None = None) -> dict:
     Trivial → Aiko answers herself (her default brain, low reasoning —
     no need to burn high-reasoning tokens on a haiku).
     Otherwise → top-ranked tool wins; dispatch specs include the table.
+    When the best tool is 'self', a per-model ranking + ε-greedy
+    exploration picks WHICH brain: proven models stay, under-tried
+    models get sampled on low-stakes tasks so learning can start.
     """
     c = classify(text, declared_type)
     if c["trivial"]:
@@ -177,13 +180,48 @@ def recommend(text: str, declared_type: str | None = None) -> dict:
         }
     ranked = rank_tools(c["shape"])
     best = ranked[0] if ranked else None
-    return {
+    rec = {
         "action": "dispatch" if best and best["tool"] != "self" else "answer_self",
         "tool": best["tool"] if best else "self",
         "classification": c,
         "ranked": ranked,
         "why": best["reasoning"] if best else "no tools available",
     }
+    if rec["action"] == "answer_self" and not c["trivial"]:
+        pick = pick_brain(c["shape"], explore=True)
+        if pick:
+            rec["brain"] = pick["model"]
+            rec["brain_why"] = pick["why"]
+            rec["brain_score"] = pick["score"]
+    return rec
+
+
+# ── model-level selection + exploration ─────────────────────────
+
+import random
+
+EXPLORE_RATE = 0.15      # 15% of low-stakes self-answers sample a new model
+EXPLORE_TOP = 6          # candidates worth exploring (not deep-tail junk)
+
+
+def pick_brain(task_shape: str, explore: bool = True) -> dict | None:
+    """Choose WHICH brain for a self-answered task.
+
+    ε-greedy: 85% take the top-ranked model, 15% sample one of the top
+    EXPLORE_TOP — the feedback ledger learns from the outcome either way.
+    Trivial/chat shapes explore freely (low stakes); heavy shapes stick
+    to proven models unless they're untried anyway.
+    """
+    from .models_catalog import rank_models
+    ranked = rank_models(task_shape, limit=EXPLORE_TOP)
+    if not ranked:
+        return None
+    low_stakes = task_shape in ("trivial", "chat")
+    if explore and low_stakes and random.random() < EXPLORE_RATE:
+        choice = random.choice(ranked)
+        return {**choice, "why": f"exploring: {choice['why']} "
+                                 f"(ε={EXPLORE_RATE:.0%} sample, learns from outcome)"}
+    return ranked[0]
 
 
 # ── prompt + tool exposure for the orchestrator brain ──────────

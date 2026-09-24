@@ -32,17 +32,19 @@ def _ledger() -> Path:
 
 
 def record_outcome(tool: str, shape: str, success: bool,
-                   duration_s: float | None = None) -> None:
+                   duration_s: float | None = None,
+                   model: str | None = None) -> None:
     p = _ledger()
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a") as f:
         f.write(json.dumps({"ts": time.time(), "tool": tool, "shape": shape,
                             "success": bool(success),
-                            "duration_s": duration_s}) + "\n")
+                            "duration_s": duration_s,
+                            "model": model}) + "\n")
 
 
-def stats(tool: str, shape: str) -> dict:
-    """Rolling (30d) stats for one (tool, task-shape) pair."""
+def stats(tool: str, shape: str, model: str | None = None) -> dict:
+    """Rolling (30d) stats; model given → per-(tool, model, shape) learning."""
     now = time.time()
     total = wins = 0
     durs: list[float] = []
@@ -55,19 +57,22 @@ def stats(tool: str, shape: str) -> dict:
                 continue
             if now - e.get("ts", 0) > PRUNE_AFTER:
                 continue
-            if e.get("tool") == tool and e.get("shape") == shape:
-                total += 1
-                wins += 1 if e.get("success") else 0
-                if e.get("duration_s"):
-                    durs.append(float(e["duration_s"]))
+            if e.get("tool") != tool or e.get("shape") != shape:
+                continue
+            if model is not None and e.get("model") != model:
+                continue
+            total += 1
+            wins += 1 if e.get("success") else 0
+            if e.get("duration_s"):
+                durs.append(float(e["duration_s"]))
     return {"total": total, "wins": wins,
             "rate": (wins / total) if total else None,
             "avg_duration_s": (sum(durs) / len(durs)) if durs else None}
 
 
-def modifier_for(tool: str, shape: str) -> float:
+def modifier_for(tool: str, shape: str, model: str | None = None) -> float:
     """Learned additive modifier; 0 until enough evidence exists."""
-    s = stats(tool, shape)
+    s = stats(tool, shape, model=model)
     if s["total"] < MIN_ATTEMPTS or s["rate"] is None:
         return 0.0
     mod = (s["rate"] - 0.5) * 0.5

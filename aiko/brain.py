@@ -70,6 +70,36 @@ class Brain:
         if self.type == "openai_compatible" and not self.api_key:
             raise RuntimeError(f"Brain '{self.name}' has no api_key (or its ${{ENV}} is unset)")
 
+    @classmethod
+    def from_provider_model(cls, provider: str, model: str) -> "Brain":
+        """Ad-hoc brain for ANY catalog model of a configured provider.
+
+        Reuses the base_url + api_key of an existing brain with the same
+        provider key — so Aiko can think with any of NIM's 82+ models (or
+        any Ollama model) without config spam, nya.
+        """
+        source = None
+        for b in _load_cfg().get("brains", []):
+            from .usage import provider_key
+            bkey = "ollama" if b.get("type") == "ollama" else \
+                provider_key(b.get("base_url") or "")
+            if bkey == provider:
+                source = b
+                break
+        if source is None:
+            raise RuntimeError(f"no configured brain for provider '{provider}'")
+        inst = cls.__new__(cls)
+        inst.name = f"{provider}:{model}"
+        inst.type = source.get("type", "openai_compatible")
+        inst.model = model
+        inst.base_url = (source.get("base_url") or "").rstrip("/")
+        inst.endpoint = (source.get("endpoint") or "http://localhost:11434").rstrip("/")
+        inst.api_key = _expand(source.get("api_key", ""))
+        inst.reasoning = "medium"
+        if inst.type == "openai_compatible" and not inst.api_key:
+            raise RuntimeError(f"provider '{provider}' has no api_key")
+        return inst
+
     def describe(self) -> str:
         if self.type == "ollama":
             return f"{self.name} (ollama:{self.model})"
