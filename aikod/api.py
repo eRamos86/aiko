@@ -4,7 +4,8 @@ import uuid
 from pathlib import Path
 
 import jwt as pyjwt
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from .docs_auditor import run_audit
 
 from .db import connect, hash_token
 from .events import append, get_for_session
@@ -186,5 +187,18 @@ def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
             "tasks": [{"id": t[0], "title": t[1], "state": t[2],
                        "provider": t[3], "model": t[4]} for t in tasks],
         }
+
+    @app.get("/audit/docs")
+    async def audit_docs(
+        max_docs: int = Query(40, ge=1, le=200),
+        auto_fix: bool = Query(True),
+        write_report: bool = Query(True),
+    ):
+        """Nightly/on-demand docs audit sweep. Server-side only."""
+        try:
+            summary = run_audit(max_docs=max_docs, auto_fix=auto_fix, write_report=write_report)
+            return summary
+        except Exception as e:
+            return {"error": str(e)}
 
     return app

@@ -26,6 +26,37 @@ def login(identifier: str = typer.Option(..., "-u", help="email or username"),
 
 
 @app.command()
+def audit_docs(
+    max_docs: int = typer.Option(40, "--max", help="max docs to scan"),
+    no_fix: bool = typer.Option(False, "--no-fix", help="flag only, don't fix"),
+):
+    """On-demand docs audit via the server's daemon (nightly runs auto)."""
+    import httpx
+    from .config_wizard import load_config
+    cfg = load_config()
+    servers = cfg.get("servers", [])
+    if not servers:
+        typer.echo("no servers configured 🐾 — audit runs server-side only")
+        raise typer.Exit(1)
+    srv = servers[0]
+    token = srv.get("token", "")
+    r = httpx.get(f"{srv['url'].rstrip('/')}/audit/docs",
+                  params={"max_docs": max_docs, "auto_fix": not no_fix},
+                  headers={"Authorization": f"Bearer {token}"},
+                  timeout=httpx.Timeout(600, connect=10))
+    data = r.json()
+    if "error" in data:
+        typer.echo(f"audit error: {data['error']}")
+        raise typer.Exit(1)
+    typer.echo(f"🐾 scanned {data['scanned']} docs "
+               f"({', '.join(data['scope'])}): "
+               f"{data['fixed']} fixed, {data['needs_ace']} need you")
+    for f in data.get("fixes", []):
+        mark = {"fixed": "✓", "needs-ace": "❓", "flagged": "⚠"}.get(f["action"], "✗")
+        typer.echo(f"  {mark} {f['path']}")
+
+
+@app.command()
 def status():
     """Targets, sessions, and daemon health."""
     from .backends import get_backend

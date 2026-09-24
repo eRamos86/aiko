@@ -41,6 +41,14 @@ def _tool_defs() -> list[dict]:
             "parameters": {"type": "object", "properties": {}},
         }},
         {"type": "function", "function": {
+            "name": "spawn_subagent",
+            "description": "Spawn a vault-defined specialist subagent (planner, critic, researcher, etc.). Light ones run on your own brain; heavy ones dispatch to a worker agent. Use for decomposition, review, second opinions.",
+            "parameters": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "subagent name from Agents/Agent-Registry.yaml"},
+                "prompt": {"type": "string", "description": "the task for the subagent"},
+                "prefer": {"type": "string", "description": "host: 'self' or a tool name (codex/agy/opencode/hermes); omit for auto"}},
+             "required": ["name", "prompt"]}}},
+        {"type": "function", "function": {
             "name": "dispatch_task",
             "description": "Send a piece of work to a target for execution.",
             "parameters": {"type": "object", "properties": {
@@ -189,6 +197,10 @@ class Orchestrator:
             b = self.backend
             if name == "list_targets":
                 return json.dumps(b.list_targets())
+            if name == "spawn_subagent":
+                return json.dumps(self._spawn_subagent(
+                    args["name"], args["prompt"],
+                    args.get("prefer")))
             if name == "dispatch_task":
                 return json.dumps(b.dispatch(args["text"], args.get("target")))
             if name == "task_status":
@@ -202,6 +214,26 @@ class Orchestrator:
             return json.dumps({"error": f"unknown tool {name}"})
         except Exception as e:
             return json.dumps({"error": str(e)})
+
+    def _spawn_subagent(self, name: str, prompt: str,
+                        prefer: str | None = None) -> dict:
+        """Universal subagents (ADR-018): materialize a vault subagent
+        definition onto the best available tool.
+
+        - Light work (critics, planners, summarizers) runs in-process on
+          Aiko's own selected brain — cheapest, no dispatch overhead.
+        - Heavy work (code tasks) dispatches to a real worker agent.
+        `prefer` lets the LLM/user force 'self' or a tool name.
+        Outcomes feed the feedback ledger keyed by subagent name so
+        'which host runs planner best' learns itself.
+        """
+        from .subagents import load_subagent, spawn
+        try:
+            return spawn(self, load_subagent(name), prompt, prefer=prefer)
+        except ValueError as e:
+            return {"error": str(e)}
+        except Exception as e:
+            return {"error": f"spawn {name}: {e}"}
 
     def step(self, user_text: str, max_tool_rounds: int = 12) -> str:
         """One user turn: loop brain->tools until a plain reply."""
