@@ -53,7 +53,10 @@ class Backend:
     def list_sessions(self) -> list[dict]:
         raise NotImplementedError
 
-    def read_transcript(self, session_id: str) -> str:
+    def read_transcript(self, session_id: str, tail: int | None = None) -> str:
+        raise NotImplementedError
+
+    def session_story(self, session_id: str) -> dict:
         raise NotImplementedError
 
     def send_to_session(self, session_id: str, text: str) -> dict:
@@ -122,11 +125,14 @@ class LocalBackend(Backend):
                               "title": task["spec"][:60]})
         return sessions
 
-    def read_transcript(self, session_id: str) -> str:
+    def read_transcript(self, session_id: str, tail: int | None = None) -> str:
         t = Path.home() / ".aiko" / "transcripts" / f"{session_id}.log"
         if not t.exists():
             return f"(no transcript for {session_id})"
-        return t.read_text(errors="replace")[-4000:]
+        text = t.read_text(errors="replace")
+        if tail:
+            return text[-tail:]
+        return text
 
     def send_to_session(self, session_id: str, text: str) -> dict:
         proc = self._procs.get(session_id)
@@ -220,9 +226,14 @@ class ServerBackend(Backend):
                 continue
         return rows
 
-    def read_transcript(self, session_id: str) -> str:
-        _, data = self._get(f"/sessions/{session_id}/transcript")
+    def read_transcript(self, session_id: str, tail: int | None = None) -> str:
+        _, data = self._get(f"/sessions/{session_id}/transcript",
+                            params={"tail": tail} if tail else None)
         return data.get("tail", "")
+
+    def session_story(self, session_id: str) -> dict:
+        _, data = self._get(f"/sessions/{session_id}/story")
+        return data
 
     def send_to_session(self, session_id: str, text: str) -> dict:
         _, data = self._post(f"/sessions/{session_id}/send", {"text": text})
@@ -271,12 +282,26 @@ class AllBackends(Backend):
             rows += self.remote.list_sessions()
         return rows
 
-    def read_transcript(self, session_id: str) -> str:
+    def read_transcript(self, session_id: str, tail: int | None = None) -> str:
         if session_id.startswith("local-"):
-            return self.local.read_transcript(session_id)
+            return self.local.read_transcript(session_id, tail=tail)
         if self.remote:
-            return self.remote.read_transcript(session_id)
+            return self.remote.read_transcript(session_id, tail=tail)
         return "(local session not found)"
+
+    def session_story(self, session_id: str) -> dict:
+        if session_id.startswith("local-"):
+            return {"goal": {"id": session_id, "text": "(local dispatch)",
+                             "status": "-", "by": "local"},
+                    "tasks": [{"id": session_id, "parent": None,
+                               "title": "(local dispatch)", "state": "-",
+                               "provider": "local", "model": "-"}],
+                    "sessions": [{"id": session_id, "task_id": session_id,
+                                 "provider": "local", "model": "-", "state": "-"}],
+                    "decisions": {}, "orchestrator_replies": {}}
+        if self.remote:
+            return self.remote.session_story(session_id)
+        return {}
 
     def send_to_session(self, session_id: str, text: str) -> dict:
         if session_id.startswith("local-"):

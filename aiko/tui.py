@@ -14,8 +14,8 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import (Button, Footer, Header, Input, ListItem, ListView,
-                             OptionList, RichLog, Select, Static,
-                             TabbedContent, TabPane)
+                             OptionList, RichLog, Select, Static, TabbedContent,
+                             TabPane, Tabs)
 
 from .agent import Orchestrator
 from .brain import Brain, list_brains
@@ -39,7 +39,7 @@ HELP_TEXT = """[b pink]Aiko slash commands[/b pink]
   [sky]/clear[/sky]            clear the chat log
   [sky]/help[/sky]             this message
 
-[i gray]keys: 1 chat · 2 sessions · 3 concord · 4 status · q quit[/i gray]"""
+[i gray]keys: 1 chat · 2 sessions · 3 concord · 4 status · v pager(copy) · q quit[/i gray]"""
 
 REASONING_LEVELS = ["low", "medium", "high"]
 
@@ -120,28 +120,59 @@ class ModelPickerScreen(ModalScreen):
 
 class AikoTUI(App):
     CSS = """
+    Screen { background: #0f0f1a; }
+    Header { background: #1a1a2e; color: #ffafff; border-bottom: solid #d75fd7; }
+    Footer { background: #1a1a2e; color: #87d7ff; }
     #status_bar { dock: bottom; height: 1; background: #1a1a2e; color: #ffafff; }
-    #chat_log { height: 1fr; border: round #d75fd7; }
-    #chat_input { dock: bottom; border: tall #d75fd7; }
+    #chat_log { height: 1fr; border: round #d75fd7; border-title-color: #ffafff;
+                padding: 0 1; }
+    #chat_input { dock: bottom; border: tall #d75fd7; background: #14142a; }
     #chat_input:focus { border: tall #ff87ff; }
     #stream_view {
         height: auto; max-height: 14; border-left: thick #d75fd7;
         padding: 0 1; margin: 0 1; display: none; color: #87d7ff;
+        background: #14142a;
     }
     #stream_view.on { display: block; }
-    #brain_bar { dock: top; height: 3; }
+    #brain_bar { dock: top; height: 3; background: #14142a; }
     #brain_label { color: #d75fd7; width: auto; padding: 0 1; }
-    #session_list { height: 45%; border: round #d75fd7; }
-    #attach_log { height: 1fr; border: round #87d7ff; }
-    #attach_input { dock: bottom; border: tall #87d7ff; }
-    #status_log { height: 1fr; border: round #d75fd7; }
+    #brain_select { width: 1fr; border: none; background: #14142a; }
+    #brain_select:hover { border: none; }
+    #reset_btn { margin-left: 1; background: #1a1a2e; color: #ffafff;
+                 border: round #d75fd7; }
+    #session_bar { dock: top; height: 2; background: #14142a; }
+    #sessions_hint { color: #6c6c8a; padding: 0 1; }
+    #refresh_btn { background: #1a1a2e; color: #ffafff;
+                   border: round #d75fd7; margin: 0 1; }
+    #session_list { height: 40%; border: round #d75fd7; background: #12121f; }
+    #session_list > ListItem { padding: 0 1; }
+    #session_list > ListItem:hover { background: #1e1e36; }
+    #session_list > ListItem.--highlight { background: #2a1e3e; }
+    #story_header { height: auto; max-height: 12; border-left: thick #87d7ff;
+                    padding: 0 1; margin: 0 1; background: #14142a;
+                    color: #e8e6f8; }
+    #story_tabs Tabs.Tab { padding: 0 2; }
+    #story_tabs Tab.-active { background: #d75fd7; color: #0f0f1a; }
+    #attach_log { height: 1fr; border: round #87d7ff; background: #12121f;
+                  padding: 0 1; }
+    #attach_input { dock: bottom; border: tall #87d7ff; background: #14142a; }
+    #status_log { height: 1fr; border: round #d75fd7; background: #12121f; }
     #concord_msg { padding: 1 2; border: round #d75fd7; color: #d75fd7; }
-    Tabs > Tabbar { background: #1a1a2e; }
-    Tabs > Tab.-active { background: #d75fd7; color: #1a1a2e; }
+    Tabs { background: #1a1a2e; }
+    Tabs > Tab { padding: 0 2; color: #6c6c8a; }
+    Tabs > Tab.-active { color: #ffafff; }
+    TabbedContent > Tabs { dock: top; }
+    TabbedContent > ContentPages { height: 1fr; }
     """
 
     BINDINGS = [
         Binding("ctrl+l", "launch_concord", "Concord"),
+        Binding("ctrl+1", "tab_chat", "Chat", priority=True),
+        Binding("ctrl+2", "tab_sessions", "Sessions", priority=True),
+        Binding("ctrl+3", "tab_concord", "Concord", priority=True),
+        Binding("ctrl+4", "tab_status", "Status", priority=True),
+        Binding("ctrl+v", "pager", "Pager", priority=True),
+        Binding("v", "pager", "Pager/copy", priority=True),
         Binding("q", "quit", "Quit"),
         Binding("1", "tab_chat", "Chat", priority=True),
         Binding("2", "tab_sessions", "Sessions", priority=True),
@@ -159,6 +190,10 @@ class AikoTUI(App):
         self.busy = False
         self.attached: str | None = None
         self._concord_open = False
+        self._story_sessions: list[dict] = []
+        self._story_active_tab: int = 0
+        self._transcript_len: dict[str, int] = {}
+        self._transcript_head: dict[str, str] = {}
 
     # ── composition ────────────────────────────────────────────
 
@@ -178,11 +213,15 @@ class AikoTUI(App):
                 yield Input(placeholder="message Aiko… (Enter to send, /help for commands)",
                             id="chat_input")
             with TabPane("📋 Sessions", id="sessions"):
-                yield Static("worker sessions — ● live · select any to attach, nya~",
-                             classes="panel-title")
+                with Horizontal(id="session_bar"):
+                    yield Static("● live ○ done  ·  select a session to see its story, nya~",
+                                 id="sessions_hint")
+                    yield Button("refresh 🐾", id="refresh_btn")
                 yield ListView(id="session_list")
+                yield Static("", id="story_header")
+                yield Tabs(id="story_tabs")
                 yield RichLog(id="attach_log", wrap=True, markup=True)
-                yield Input(placeholder="message the attached worker…",
+                yield Input(placeholder="message the attached worker… (v = pager for copy)",
                             id="attach_input")
             with TabPane("🎀 Concord", id="concord"):
                 yield Static("", id="concord_msg")
@@ -535,27 +574,128 @@ class AikoTUI(App):
             self._attach_session(rows[data_idx]["id"], rows[data_idx]["state"])
 
     def _attach_session(self, sid: str, state: str = "?") -> None:
+        """Attach: load the STORY (goal → decisions → sessions), then transcripts."""
         self.attached = sid
+        self._story_data = None
         try:
+            hdr = self.query_one("#story_header", Static)
             log = self.query_one("#attach_log", RichLog)
         except Exception:
             return
         log.clear()
-        mark = "● live" if state == "live" else "○ finished"
-        log.write(f"[b]attached to {sid}[/b] [{mark}] — transcript below"
-                  + (" — type to steer the worker nya~" if state == "live"
-                     else " — session finished; reads work, sends won't, mrrp"))
+        hdr.update(f"[b pink]🐾 loading story for {sid[:14]}…[/b pink]")
+
+        def run():
+            try:
+                story = self.backend.session_story(sid)
+                self.call_from_thread(self._render_story, sid, state, story)
+            except Exception as e:
+                self.call_from_thread(
+                    lambda: hdr.update(f"[red]story failed: {e}[/red]"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _render_story(self, sid: str, state: str, story: dict) -> None:
+        """Paint the delegation story: goal → decisions → parallel sessions."""
+        self._story_data = story
+        try:
+            hdr = self.query_one("#story_header", Static)
+            tabs = self.query_one("#story_tabs", Tabs)
+            log = self.query_one("#attach_log", RichLog)
+        except Exception:
+            return
+        log.clear()
+        goal = story.get("goal", {})
+        lines = [
+            f"[b pink]🐾 goal[/b pink] [sky]{goal.get('id', '?')}[/sky] "
+            f"[dim]by {goal.get('by', '?')} · {goal.get('status', '?')}[/dim]",
+            f"    {self._esc(goal.get('text', ''))[:120]}",
+            "",
+        ]
+        tasks = story.get("tasks", [])
+        decisions = story.get("decisions", {})
+        for t in tasks:
+            tid = t["id"]
+            prov = t.get("provider") or "?"
+            model = t.get("model") or "?"
+            dec = decisions.get(tid, {})
+            reason = dec.get("reasoning") or ""
+            mark = "●" if t.get("state") == "running" else (
+                "✓" if t.get("state") == "completed" else "○")
+            style = "pink" if t.get("state") == "running" else "dim"
+            lines.append(
+                f"  [{style}]{mark} {t['title'][:60]}[/{style}] "
+                f"[sky]{prov}/{model}[/sky]")
+            if dec:
+                lines.append(f"      [dim]↳ routed to [sky]{dec['provider']}/{dec['model']}[/sky]"
+                             f" — {self._esc(reason)[:100]}[/dim]")
+        orch = story.get("orchestrator_replies", {})
+        if orch:
+            lines.append("")
+            lines.append("[b mint]🧠 server orchestrator[/b mint]")
+            for tid, reply in list(orch.items())[:3]:
+                lines.append(f"  [dim]{tid[:14]}:[/dim] {self._esc(reply)[:140]}")
+        hdr.update("\n".join(lines))
+
+        # tabs: one per session in this goal (parallel workers)
+        tabs.clear()
+        sessions = story.get("sessions", [])
+        if not sessions:
+            tabs.add_tab("no sessions, mrrp")
+            return
+        for s in sessions:
+            mark = "●" if s.get("state") == "live" else "○"
+            tabs.add_tab(f"{mark} {s.get('provider', '?')}/{(s.get('model') or '?')[:18]}")
+        self._story_sessions = sessions
+        # load the first (or the clicked) session's transcript
+        target = next((s for s in sessions if s["id"] == sid), sessions[0])
+        self._load_session_transcript(target["id"], live=state == "live")
+
+    def _load_session_transcript(self, sid: str, live: bool = False) -> None:
+        """Fetch FULL transcript (tail=0) and render without scroll snap."""
+        def run():
+            try:
+                text = self.backend.read_transcript(sid)
+                self.call_from_thread(self._write_transcript, sid, text)
+            except Exception as e:
+                self.call_from_thread(
+                    lambda: self.query_one("#attach_log", RichLog).write(
+                        f"[red]transcript failed: {e}[/red]"))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _write_transcript(self, sid: str, text: str) -> None:
+        """Render transcript; live sessions get delta-append (no clear+snap)."""
+        try:
+            log = self.query_one("#attach_log", RichLog)
+        except Exception:
+            return
+        prev_len = self._transcript_len.get(sid, 0)
+        if prev_len and text.startswith(self._transcript_head.get(sid, "\x00")):
+            # delta: append only the new part — preserves scroll position
+            new_part = text[prev_len:]
+            if new_part:
+                log.write(self._esc(new_part))
+        else:
+            log.clear()
+            log.write(self._esc(text) or "(empty transcript)")
+        self._transcript_len[sid] = len(text)
+        self._transcript_head[sid] = text[:200]
 
     def _tick_attached(self) -> None:
         if not self.attached or not self.is_attached:
             return
-        try:
-            log = self.query_one("#attach_log", RichLog)
-            tail = self.backend.read_transcript(self.attached)
-        except Exception:
+        sess = getattr(self, "_story_sessions", None)
+        if not sess:
             return
-        log.clear()
-        log.write(tail[-3000:] or "(empty transcript)")
+        active_idx = getattr(self, "_story_active_tab", 0)
+        if active_idx >= len(sess):
+            return
+        sid = sess[active_idx]["id"]
+        live = sess[active_idx].get("state") == "live"
+        if not live:
+            return  # finished sessions: no polling, no scroll snap, nya
+        self._load_session_transcript(sid, live=True)
 
     def _handle_attach_send(self, text: str, input_box: Input) -> None:
         if not text:
@@ -632,6 +772,91 @@ class AikoTUI(App):
                                 "tmux", "attach-session", "-t", "concord"])
         finally:
             self._concord_open = False
+
+    def on_tabs_tab_activated(self, event) -> None:
+        """Story tab switched → load that parallel session's transcript."""
+        if not getattr(self, "_story_sessions", None):
+            return
+        try:
+            idx_raw = event.tab_index if hasattr(event, "tab_index") else \
+                self.query_one("#story_tabs", Tabs).active
+            idx = int(idx_raw) if idx_raw is not None else None
+        except Exception:
+            return
+        if idx is None or not (0 <= idx < len(self._story_sessions)):
+            return
+        self._story_active_tab = idx
+        sid = self._story_sessions[idx]["id"]
+        # clear per-session transcript cache for clean render
+        self._transcript_len.pop(sid, None)
+        self._transcript_head.pop(sid, None)
+        try:
+            self.query_one("#attach_log", RichLog).clear()
+        except Exception:
+            pass
+        self._load_session_transcript(sid)
+
+    def on_key(self, event) -> None:
+        """Global key hook: digits switch tabs even while an Input is focused.
+
+        Inputs consume printable keys before app bindings see them, so we
+        intercept here — but ONLY when the input is empty (typing a real
+        message like '2fa code' must not jump tabs, nya).
+        """
+        focused = self.focused
+        key = getattr(event, "key", "")
+        tab_map = {"1": "chat", "2": "sessions", "3": "concord", "4": "status"}
+        if key in tab_map and isinstance(focused, Input):
+            if not focused.value:
+                event.stop()
+                event.prevent_default()
+                self._activate(tab_map[key])
+        elif key == "v" and isinstance(focused, Input) and not focused.value:
+            event.stop()
+            event.prevent_default()
+            self.action_pager()
+
+    def action_pager(self) -> None:
+        """Open the current log in the terminal's native pager (less).
+
+        This is the copy path: mouse events belong to the TUI, but inside
+        `less` the terminal regains native mouse selection. q returns.
+        """
+        from textual.widgets import RichLog as _RL
+        pane = self.query("TabbedContent TabPane")
+        active_id = self.query_one(TabbedContent).active
+        target = "#chat_log" if active_id == "chat" else (
+            "#attach_log" if active_id == "sessions" else
+            "#status_log" if active_id == "status" else None)
+        if not target:
+            self.notify("no log here to page, mrrp")
+            return
+        try:
+            log = self.query_one(target, _RL)
+            text = "\n".join(
+                seg.text for line in log.lines for seg in line)
+            text = self._strip_markup(text)
+        except Exception as e:
+            self.notify(f"pager failed: {e}")
+            return
+        if not text.strip():
+            self.notify("nothing to page, nya")
+            return
+        import subprocess
+        import tempfile
+        with tempfile.NamedTemporaryFile("w", suffix=".log", delete=False) as f:
+            f.write(text)
+            path = f.name
+        with self.suspend():
+            subprocess.run(["less", "-R", path])
+        import os
+        os.unlink(path)
+
+    @staticmethod
+    def _strip_markup(text: str) -> str:
+        """Remove Textual/Rich markup tags from extracted log text."""
+        import re as _re
+        return _re.sub(r"\[/?[a-z0-9 #]+\]", "", text)
 
     # ── tabs ────────────────────────────────────────────────────
 
