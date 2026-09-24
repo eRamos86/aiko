@@ -44,8 +44,11 @@ def assemble_bundle(task_spec: str, hints: list[str] | None = None) -> str:
     """
     parts = [f"# Task\n{task_spec}\n"]
 
-    # Always include the universal hub + shared context (small, high-value).
-    for must in ("Agents/Agents.md", "Agents/Shared-Context.md"):
+    # Always include the universal layer (small, high-value, D19):
+    # hub, shared context, context router, and the agent operating system.
+    for must in ("Agents/Agents.md", "Agents/Shared-Context.md",
+                 "Agents/Context Router.md",
+                 "Agents/System/Agent Operating System.md"):
         content = fetch_doc(must)
         if content:
             parts.append(f"---\n# Vault: {must}\n{content}\n")
