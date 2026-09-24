@@ -2,6 +2,7 @@ import argparse
 import os
 import threading
 import time
+from pathlib import Path
 
 import uvicorn
 
@@ -39,6 +40,61 @@ def spawn_routed_task(db_path, adapters, task_id, decision):
     return session_id
 
 
+def orchestrator_loop(db_path, adapters, poll_interval: float = 5.0):
+    """Server-side orchestrator (ADR-012): watch running tasks; when a
+    worker finishes, decide follow-up work ON THE SERVER — spawn subtasks,
+    steer workers, reply to the goal — no round-trip to the local client.
+
+    v1 trigger: any task reaching 'running' gets one orchestrator pass
+    when its session exits; the orchestrator may queue subtasks (staying
+    on this server) or mark the goal complete with a summary reply."""
+    import time as _time
+    from .orchestrator import ServerOrchestrator
+
+    seen: set[str] = set()
+    while True:
+        try:
+            conn = connect(Path(db_path))
+            rows = conn.execute(
+                "SELECT s.task_id FROM session s WHERE s.state='exited' "
+                "AND s.task_id NOT IN (SELECT task_id FROM orchestrator_run)"
+            ).fetchall() if _orchestrator_runs_table(conn) else []
+            for (task_id,) in rows:
+                if task_id in seen:
+                    continue
+                seen.add(task_id)
+                try:
+                    orch = ServerOrchestrator(db_path, task_id)
+                    reply = orch.step(
+                        "The worker session for this task has exited. Read the "
+                        "transcript with your tools, then decide: if the task "
+                        "is done, reply with a short completion summary for "
+                        "the goal. If more work is needed, dispatch subtasks "
+                        "on this server. Do not ask the user questions.")
+                    conn2 = connect(Path(db_path))
+                    conn2.execute(
+                        "INSERT INTO orchestrator_run(task_id, reply, ts) "
+                        "VALUES (?,?,datetime('now'))", (task_id, reply))
+                    conn2.execute(
+                        "UPDATE task SET state='completed' WHERE id=? AND state='running'",
+                        (task_id,))
+                    append(conn2, task_id, "task.orchestrated",
+                           {"reply": reply[:2000]})
+                except Exception as e:
+                    print(f"[orchestrator] {task_id}: {e}", flush=True)
+        except Exception as e:
+            print(f"[orchestrator] loop error: {e}", flush=True)
+        _time.sleep(poll_interval)
+
+
+def _orchestrator_runs_table(conn) -> bool:
+    """Ensure the orchestrator_run ledger exists (idempotent)."""
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS orchestrator_run ("
+        "task_id TEXT PRIMARY KEY, reply TEXT, ts TEXT)")
+    return True
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--db", default=os.path.expanduser("~/.aikod/aikod.db"))
@@ -64,6 +120,9 @@ def main():
             time.sleep(args.scheduler_interval)
 
     threading.Thread(target=scheduler_loop, daemon=True).start()
+    if os.environ.get("AIKOD_ORCHESTRATOR", "1") != "0":
+        threading.Thread(target=orchestrator_loop,
+                         args=(args.db, ADAPTERS), daemon=True).start()
 
     app = create_app(args.db)
     host, port = args.bind.split(":")
