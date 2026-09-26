@@ -23,17 +23,30 @@ from pathlib import Path
 CACHE_PATH = Path.home() / ".aiko" / "models_catalog.json"
 CACHE_TTL = 86400  # 24h
 
-# (regex on model id, {shape: additive boost}) — seeds only, learning overrides
+# (regex on model id, {persona: additive boost}) — seeds only; the feedback
+# ledger is the real signal. Many buckets by user request: any model can be
+# "the right one" for somebody's specific ask.
+PERSONAS = ("code", "debug", "research", "plan", "write", "data",
+            "support", "chat", "teach", "devops")
+
 PRIOR_RULES = [
-    (r"reason(ing)?|think|-r1\b|qwq|deepseek-r", {"research": 0.2, "plan": 0.25, "debug": 0.2}),
-    (r"coder|code|starcoder|devstral|codestral", {"implement": 0.25, "debug": 0.15, "review": 0.1}),
-    (r"nano|mini|flash|lite|8b|7b|4b|3b|small", {"trivial": 0.25, "chat": 0.2}),
-    (r"ultra|large|pro\b|120b|550b|70b|405b", {"research": 0.1, "plan": 0.1, "write_docs": 0.05}),
-    (r"vl|-omni|vision|llava", {"research": 0.05}),
+    (r"coder|code|starcoder|devstral|codestral|codellama|codegemma|codeqwen",
+     {"code": 0.30, "debug": 0.20, "devops": 0.10}),
+    (r"reason(ing)?|think|-r1|qwq|deepseek-r01|deepseek-r1",
+     {"research": 0.25, "plan": 0.28, "debug": 0.15, "data": 0.10}),
+    (r"ultra|large|405b|120b|550b|70b|671b|\bpro\b|opus",
+     {"research": 0.12, "plan": 0.12, "write": 0.08, "teach": 0.05}),
+    (r"nano|mini|flash|lite|small|8b|7b|4b|3b|2b|1\.5b|0\.6b",
+     {"chat": 0.22, "support": 0.08}),
+    (r"instruct|chat|it\b", {"chat": 0.12, "support": 0.10, "teach": 0.08}),
+    (r"writer|creative|story|nova", {"write": 0.20, "support": 0.06}),
+    (r"mistral|mixtral|llama-3\.3|command-a|gemma3",
+     {"write": 0.10, "chat": 0.12, "support": 0.08, "research": 0.06}),
+    (r"math|finance|deepseek-math", {"data": 0.25, "research": 0.10}),
+    (r"nomadic|wizard|dolphin", {"support": 0.15, "write": 0.10, "chat": 0.08}),
 ]
 
-BASE_PRIORS = {"trivial": 0.5, "chat": 0.5, "research": 0.5, "plan": 0.5,
-               "implement": 0.5, "debug": 0.5, "review": 0.5, "write_docs": 0.5}
+BASE_PRIORS = {p: 0.5 for p in PERSONAS}
 
 
 _CACHE_MEMORY: tuple[float, dict] | None = None
@@ -69,7 +82,7 @@ def priors_for(model_id: str) -> dict:
     for rx, boosts in PRIOR_RULES:
         if re.search(rx, model_id, re.I):
             for shape, b in boosts.items():
-                p[shape] = min(1.0, p[shape] + b)
+                p[shape] = min(1.0, p.get(shape, 0.5) + b)
     return p
 
 
@@ -240,22 +253,25 @@ def catalog0_names() -> list[str]:
 
 
 def rank_models(task_shape: str, limit: int = 12) -> list[dict]:
-    """Rank EVERY known model for a shape: prior + learned modifier.
+    """Rank EVERY known model for a persona: (seed|prior) × 0.4 + learned.
 
-    score = prior(shape) + learned (tool='self', model, shape)
-    — exploration happens in selection.recommend, not here.
+    score = 0.4 × max(seed_bench, name-prior) + 0.6 × learned modifier
+    Seeds (aiko/seed_scores.py) are cold-start quality only; the feedback
+    ledger is the user's real signal and dominates once it has data.
     """
     from .feedback import modifier_for
+    from .seed_scores import seed_scores
     rows = []
     for prov, ids in catalog().items():
         if prov == "ollama_installable":
-            continue  # ranking is for usable-now models
+            continue
         for m in ids:
-            prior = priors_for(m).get(task_shape, 0.5)
+            seeded = seed_scores(m).get(task_shape, 0.0)
+            prior = max(seeded, priors_for(m).get(task_shape, 0.5))
             fb = modifier_for("self", task_shape, model=m)
-            score = round(max(0.0, min(1.0, prior + fb)), 3)
+            score = round(max(0.0, min(1.0, prior * 0.4 + fb * 0.6 + 0.3)), 3)
             rows.append({"provider": prov, "model": m, "score": score,
                          "prior": round(prior, 3), "feedback": fb,
-                         "why": f"prior={prior:.2f} + learned={fb:+.2f}"})
+                         "why": f"seed|prior={prior:.2f}, learned={fb:+.2f}"})
     rows.sort(key=lambda r: (-r["score"], r["model"]))
     return rows[:limit]

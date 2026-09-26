@@ -18,16 +18,16 @@ def test_priors_reasoning_models_boost_plan(env):
     assert p2["plan"] == 0.5
 
 
-def test_priors_coder_models_boost_implement(env):
+def test_priors_coder_models_boost_code(env):
     mc = env
-    p = mc.priors_for("qwen/qwen3-coder-480b")
-    assert p["implement"] > 0.5
+    p = mc.priors_for("qwen3-coder-480b")
+    assert p["code"] > 0.5
 
 
-def test_priors_small_models_boost_trivial(env):
+def test_priors_small_models_boost_chat(env):
     mc = env
-    p = mc.priors_for("meta/llama-3.1-8b-instruct")
-    assert p["trivial"] > 0.5
+    p = mc.priors_for("nemotron-nano-30b")
+    assert p["chat"] > 0.5
 
 
 def test_catalog_discovery_caches(env, monkeypatch):

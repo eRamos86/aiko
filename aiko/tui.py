@@ -64,12 +64,29 @@ class ModelPickerScreen(ModalScreen):
     #reasoning_row { height: 1; padding: 0 1; color: #87d7ff; }
     """
     BINDINGS = [
+        Binding("up", "cursor_up", "↑", priority=True),
+        Binding("down", "cursor_down", "↓", priority=True),
         Binding("left", "reason_left", "reasoning −"),
         Binding("right", "reason_right", "reasoning +"),
+        Binding("enter", "confirm", "Pick", priority=True),
         Binding("escape", "cancel", "Cancel"),
     ]
 
     PullHint = "↓↓ pull:"
+
+    # persona label → picker presentation; full list lives in models_catalog.PERSONAS
+    PERSONA_SECTIONS = [
+        ("code",     "🔧 code/fixes"),
+        ("debug",    "🐛 debug"),
+        ("plan",     "🗺  plan"),
+        ("research", "🔬 research"),
+        ("write",    "✍  write"),
+        ("data",     "📊 data/finance"),
+        ("support",  "🫂 support/journal"),
+        ("chat",     "💬 chat"),
+        ("teach",    "📚 teach"),
+        ("devops",   "⚙  devops"),
+    ]
 
     def __init__(self, current_brain: str | None, current_reasoning: str):
         super().__init__()
@@ -79,32 +96,40 @@ class ModelPickerScreen(ModalScreen):
         self._all_rows: list[dict] = self._gather_rows()
 
     def _gather_rows(self) -> list[dict]:
-        rows = []
-        for b in list_brains():
-            rows.append({"kind": "configured", "label": f"✓ {b['name']} · {b.get('model', '?')}",
-                         "brain": b["name"]})
-        try:
-            from .models_catalog import catalog
-            cat = catalog()
-            have = {b.get("model") for b in list_brains()}
-            for provider in ("nim", "ollama"):
-                for m in sorted(cat.get(provider, [])):
-                    if m not in have:
-                        rows.append({"kind": "catalog", "provider": provider, "model": m,
-                                     "label": f"  {provider}:{m}"})
-            for m in cat.get("ollama_installable", []):
-                rows.append({"kind": "pull", "provider": "ollama", "model": m,
-                             "label": f"{self.PullHint} ollama:{m}"})
-            # sized variants (fits-flagged) appear above unsized family rows
-            from .models_catalog import registry_pull_models
-            for v in registry_pull_models():
-                mark = "✓ fits" if v["fits"] else "⚠ too big here"
-                gb = f"~{v['gb']}GB" if v["gb"] else "?unknown size"
-                rows.append({"kind": "pull", "provider": "ollama",
-                             "model": v["model"],
-                             "label": f"{self.PullHint} ollama:{v['model']}  [{gb} · {mark}]"})
-        except Exception:
-            pass
+        """All models — NO 'configured' split — grouped by provider, each
+        provider section lists top models per persona (ranked by seed +
+        learned feedback), then pullable variants at the bottom."""
+        from .models_catalog import catalog, rank_models, registry_pull_models
+        rows: list[dict] = []
+        cat = catalog()
+        have_ollama = set(cat.get("ollama", []))
+        # persona → top model per provider (seed+learned score)
+        tops: dict[str, dict[str, dict]] = {p: {} for p, _ in self.PERSONA_SECTIONS}
+        for persona, _ in self.PERSONA_SECTIONS:
+            for r in rank_models(persona, limit=30):
+                if r["provider"] not in tops[persona]:
+                    tops[persona][r["provider"]] = r
+        providers = ("nim", "ollama")
+        for prov in providers:
+            if prov not in cat:
+                continue
+            rows.append({"kind": "header", "label": f"── {prov.upper()} ──"})
+            for persona, pretty in self.PERSONA_SECTIONS:
+                top = tops[persona].get(prov)
+                if not top:
+                    continue
+                note = "✓ installed" if (prov == "ollama" and top["model"] in have_ollama) else ""
+                rows.append({"kind": "catalog", "provider": prov,
+                             "model": top["model"],
+                             "label": f"  {pretty:<18} {top['model']}  "
+                                      f"({top['score']:.2f}) {note}"})
+            if prov == "ollama":
+                for v in registry_pull_models():
+                    mark = "✓ fits" if v["fits"] else "⚠ too big here"
+                    gb = f"~{v['gb']}GB" if v["gb"] else "?unknown size"
+                    rows.append({"kind": "pull", "provider": "ollama",
+                                 "model": v["model"],
+                                 "label": f"  {self.PullHint} ollama:{v['model']}  [{gb} · {mark}]"})
         return rows
 
     def compose(self) -> ComposeResult:
@@ -129,15 +154,51 @@ class ModelPickerScreen(ModalScreen):
                 continue
             self._shown.append(row)
             ol.add_option(row["label"])
-        if self._shown:
+        if self._shown and not needle:
             for i, row in enumerate(self._shown):
-                if row.get("brain") == self.current_brain:
+                if row.get("model") == self.current_brain or row.get("brain") == self.current_brain:
                     ol.highlighted = i
                     break
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "model_filter":
             self._refresh_options(event.value)
+
+    def _cursor_step(self, direction: int) -> None:
+        ol = self.query_one("#model_list", OptionList)
+        n = len(self._shown)
+        if n == 0:
+            return
+        i = ol.highlighted if ol.highlighted is not None else (0 if direction > 0 else n - 1)
+        i = (i + direction) % n
+        ol.highlighted = i
+
+    def action_cursor_up(self) -> None:
+        self._cursor_step(-1)
+
+    def action_cursor_down(self) -> None:
+        self._cursor_step(1)
+
+    def action_confirm(self) -> None:
+        self._select(self.query_one("#model_list", OptionList).highlighted)
+
+    def _select(self, index: int | None) -> None:
+        result: dict = {}
+        if index is None or not (0 <= index < len(self._shown)):
+            self.dismiss(None)
+            return
+        row = self._shown[index]
+        if row["kind"] == "header":
+            self._cursor_step(1)
+            return
+        result = {"reasoning": REASONING_LEVELS[self.reasoning_index]}
+        if row["kind"] == "catalog":
+            result["provider_model"] = [row["provider"], row["model"]]
+        elif row["kind"] == "pull":
+            result["pull"] = row["model"] or ""
+        elif row["kind"] == "configured":
+            result["brain"] = row.get("brain") or ""
+        self.dismiss(result)
 
     def _update_reasoning_row(self) -> None:
         level = REASONING_LEVELS[self.reasoning_index]
@@ -160,18 +221,7 @@ class ModelPickerScreen(ModalScreen):
             index = event.option_index
         except AttributeError:
             index = self.query_one("#model_list", OptionList).highlighted
-        if index is None or not (0 <= index < len(self._shown)):
-            self.dismiss(None)
-            return
-        row = self._shown[index]
-        result = {"reasoning": REASONING_LEVELS[self.reasoning_index]}
-        if row["kind"] == "configured":
-            result["brain"] = row["brain"]
-        elif row["kind"] == "catalog":
-            result["provider_model"] = (row["provider"], row["model"])
-        else:  # pull
-            result["pull"] = row["model"]
-        self.dismiss(result)
+        self._select(index)
 
 
 # ── main app ─────────────────────────────────────────────────────
@@ -334,12 +384,27 @@ class AikoTUI(App):
         brains = list_brains()
         if brains:
             from .config import load_config
-            default = load_config().get("default_brain")
-            first = next((b["name"] for b in brains if b["name"] == default),
-                         brains[0]["name"])
-            select = self.query_one("#brain_select", Select)
-            select.value = first
-            self._set_brain(first)
+            default = load_config().get("default_brain", "")
+            if ":" in default and default.split(":", 1)[0] in ("nim", "ollama"):
+                # ad-hoc provider:model persisted by /model — on restart we
+                # just resolve through the catalog (no extra config row).
+                provider, model = default.split(":", 1)
+                try:
+                    from .brain import Brain as _B
+                    self.orchestrator.brain = _B.from_provider_model(provider, model)
+                    self._update_brain_label()
+                except Exception:
+                    first = next((b["name"] for b in brains if b["name"] == default),
+                                 brains[0]["name"])
+                    select = self.query_one("#brain_select", Select)
+                    select.value = first
+                    self._set_brain(first)
+            else:
+                first = next((b["name"] for b in brains if b["name"] == default),
+                             brains[0]["name"])
+                select = self.query_one("#brain_select", Select)
+                select.value = first
+                self._set_brain(first)
 
         msg = self.query_one("#concord_msg", Static)
         from shutil import which
@@ -379,17 +444,20 @@ class AikoTUI(App):
                 self.orchestrator.switch_brain(name)
             if reasoning and self.orchestrator:
                 self.orchestrator.brain.set_reasoning(reasoning)
-            # persist last-used brain so next launch restores it
-            try:
-                from .config import load_config, save_config
-                cfg = load_config()
-                cfg["default_brain"] = name
-                save_config(cfg)
-            except Exception:
-                pass
+            self._persist_default_brain(name)
             self._update_brain_label()
         except RuntimeError as e:
             self.query_one("#brain_label", Static).update(f"🐾 [red]{e}[/red]")
+
+    @staticmethod
+    def _persist_default_brain(name: str) -> None:
+        try:
+            from .config import load_config, save_config
+            cfg = load_config()
+            cfg["default_brain"] = name
+            save_config(cfg)
+        except Exception:
+            pass
 
     def _update_brain_label(self) -> None:
         if self.orchestrator:
@@ -452,6 +520,11 @@ class AikoTUI(App):
                     self._update_brain_label()
                     log.write(f"[pink]brain (ad-hoc) →[/pink] [b]{new_brain.describe()}[/b] "
                               f"[gray]· reasoning: {result['reasoning']}[/gray] nyaa~")
+                    # persist for restart-memory
+                    from .config import load_config, save_config
+                    cfg = load_config()
+                    cfg["default_brain"] = f"{provider}:{model}"
+                    save_config(cfg)
                 except Exception as e:
                     log.write(f"[red]can't adopt {provider}:{model}: {e}[/red]")
                 return
