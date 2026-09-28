@@ -12,7 +12,7 @@ on:
       - 'aiko-ide-v*'
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   macos-arm64:
@@ -31,6 +31,11 @@ jobs:
           "$RUNNER_TEMP/aiko-test-venv/bin/python" -m pytest -q
           node --check ide/extensions/aiko-orchestrator/extension.js
       - name: Build unsigned Apple Silicon candidate
+        # Code-OSS downloads a pinned ripgrep binary during npm postinstall.
+        # This read-only Actions token exists only for that build process and
+        # is never emitted into the artifact, manifest, source, or Aiko state.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           python3 scripts/build_ide_release.py candidate \
             --version "$AIKO_IDE_VERSION" \
