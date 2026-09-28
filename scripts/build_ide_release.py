@@ -49,6 +49,12 @@ def source_tree(destination: Path) -> Path:
     tree = destination / "source"
     run([sys.executable, str(ROOT / "scripts" / "bootstrap_code_oss.py"),
          "--destination", str(tree)], cwd=ROOT)
+    # The source is intentionally an archive, not a clone.  Code-OSS's own
+    # postinstall still queries a repository-local pull.rebase setting, so give
+    # this disposable build tree the smallest possible local Git context.  It
+    # has no remote, commits, credentials, or relationship to an Aiko workspace.
+    run(["git", "init", "--quiet"], cwd=tree)
+    run(["git", "config", "pull.rebase", "merges"], cwd=tree)
     return tree
 
 

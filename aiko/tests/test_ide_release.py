@@ -31,3 +31,16 @@ def test_manifest_is_hash_bound_to_the_artifact(tmp_path):
     assert manifest["sha256"] == release.sha256(archive)
     assert "94e8ae2b28cb5cc932b86e1070569c4463565c37" == manifest["upstream"]["commit"]
     assert archive.name in (tmp_path / "SHA256SUMS").read_text()
+
+
+def test_archive_source_tree_gets_only_the_git_metadata_upstream_requires(tmp_path, monkeypatch):
+    calls = []
+
+    def fake_run(argv, *, cwd):
+        calls.append((argv, cwd))
+
+    monkeypatch.setattr(release, "run", fake_run)
+    tree = release.source_tree(tmp_path)
+    assert tree == tmp_path / "source"
+    assert calls[1] == (["git", "init", "--quiet"], tree)
+    assert calls[2] == (["git", "config", "pull.rebase", "merges"], tree)
