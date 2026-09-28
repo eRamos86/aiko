@@ -1,0 +1,42 @@
+name: Aiko IDE candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Candidate version, for example 1.0.0-rc.1
+        required: true
+        type: string
+  push:
+    tags:
+      - 'aiko-ide-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  macos-arm64:
+    runs-on: macos-14
+    env:
+      AIKO_IDE_VERSION: ${{ inputs.version || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Verify Aiko code and release contract
+        run: |
+          python3 -m pip install pytest pytest-asyncio
+          python3 -m pytest -q
+          node --check ide/extensions/aiko-orchestrator/extension.js
+      - name: Build unsigned Apple Silicon candidate
+        run: |
+          python3 scripts/build_ide_release.py candidate \
+            --version "$AIKO_IDE_VERSION" \
+            --arch arm64 \
+            --destination "$RUNNER_TEMP/aiko-ide"
+      - name: Upload candidate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: aiko-ide-darwin-arm64-${{ env.AIKO_IDE_VERSION }}
+          path: ${{ runner.temp }}/aiko-ide/artifacts/

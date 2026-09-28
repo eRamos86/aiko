@@ -93,6 +93,9 @@ The command downloads a pinned upstream **archive** rather than creating another
 Git clone. It does not touch `~/.aiko`, existing Aiko workers, or a workspace.
 See [`ide/README.md`](ide/README.md) for the build and attribution contract.
 
+For a runnable desktop build or a distributable signed macOS artifact, use the
+release modes documented in [`ide/README.md`](ide/README.md#builds-and-releases).
+
 ## TUI keys & slash commands
 
 | key | action |
