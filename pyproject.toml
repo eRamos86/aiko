@@ -1,6 +1,6 @@
 [project]
 name = "aiko"
-version = "1.0.0"
+version = "1.1.0"
 description = "Aiko — The Agent Orchestrator for all your AI Agents"
 requires-python = ">=3.11"
 license = "MIT"
@@ -22,7 +22,7 @@ aikod = "aikod.__main__:main"
 aao = "aiko.cli:app"
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "httpx2>=0.27"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "build>=1.2"]
 
 [tool.pytest.ini_options]
 testpaths = ["aiko/tests", "aikod/tests"]

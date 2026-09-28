@@ -8,11 +8,11 @@ The Orchestrator only talks to a Backend — it never knows which mode is active
 Multi-server: each server is addressable by name; dispatch takes optional target.
 """
 import json
-import subprocess
-import time
 from pathlib import Path
 
 import httpx
+
+from .session_manager import SessionManager
 
 
 # ── helpers ─────────────────────────────────────────────────────
@@ -63,22 +63,21 @@ class Backend:
         raise NotImplementedError
 
 
-# ── Local backend — spawns configured agents directly ────────────
+# ── Local backend — durable direct tmux workers ──────────────────
 
 class LocalBackend(Backend):
     name = "local"
 
-    def __init__(self):
-        self.cfg = _load_cfg()
+    def __init__(self, config=None):
+        self.cfg = _load_cfg() if config is None else config
         self.agents = {a["name"]: a for a in self.cfg.get("agents", [])}
-        self._procs: dict[str, subprocess.Popen] = {}
-        self._tasks: dict[str, dict] = {}
-        self._learned: set[str] = set()
+        self.sessions = SessionManager(self.cfg)
 
     def list_targets(self) -> list[dict]:
         return [{"target": "local", "agents": sorted(self.agents.keys())}]
 
-    def dispatch(self, text: str, target: str | None = None) -> dict:
+    def dispatch(self, text: str, target: str | None = None, *, cwd=None,
+                 repo_direct=False) -> dict:
         # pick agent: prefer hermes → codex → antigravity → first configured
         for preferred in ("hermes", "codex", "antigravity"):
             if preferred in self.agents:
@@ -89,72 +88,55 @@ class LocalBackend(Backend):
                 return {"error": "no agents configured in ~/.aiko/config.yaml"}
             agent = next(iter(self.agents.values()))
 
-        task_id = f"local-{int(time.time() * 1000):x}"
-        transcript = Path.home() / ".aiko" / "transcripts" / f"{task_id}.log"
-        transcript.parent.mkdir(parents=True, exist_ok=True)
-
-        template = agent.get("one_shot", ["{prompt}"])
-        cmd = [self._expand_arg(a, text) for a in template]
-        cmd = [agent["command"]] + cmd
-
-        proc = subprocess.Popen(cmd, stdout=transcript.open("w"),
-                                stderr=subprocess.STDOUT)
-        self._procs[task_id] = proc
-        self._tasks[task_id] = {"agent": agent["name"], "started": time.time(),
-                                "spec": text[:200]}
-        return {"dispatched": True, "task_id": task_id, "agent": agent["name"],
-                "target": "local", "transcript": str(transcript)}
-
-    @staticmethod
-    def _expand_arg(arg: str, prompt: str) -> str:
-        return arg.replace("{prompt}", prompt)
+        try:
+            session = self.sessions.dispatch(agent["name"], cwd or Path.cwd(), text,
+                                             target=target or "local", repo_direct=repo_direct)
+        except (ValueError, RuntimeError, OSError) as exc:
+            return {"error": str(exc)}
+        return {**session, "dispatched": True, "task_id": session["id"]}
 
     def task_status(self, task_id: str, target: str | None = None) -> dict:
-        proc = self._procs.get(task_id)
-        if not proc:
+        try:
+            session = self.sessions.get(task_id)
+        except ValueError:
             return {"error": "unknown task"}
-        alive = proc.poll() is None
-        status = {"task_id": task_id, "state": "running" if alive else "completed",
-                  "agent": self._tasks[task_id]["agent"]}
+        if target is not None and target != session["target"]:
+            return {"error": "session target mismatch"}
+        status = {**session, "task_id": task_id}
         # learning: on completion, fold the outcome into the feedback ledger
-        if not alive and task_id not in self._learned:
-            self._learned.add(task_id)
+        if (session["state"] in {"completed", "failed"}
+                and self.sessions.claim_outcome(task_id)):
             try:
                 from .feedback import record_outcome
-                tr = Path.home() / ".aiko" / "transcripts" / f"{task_id}.log"
-                ok = True
-                if tr.exists():
-                    low = tr.read_text(errors="replace").lower()
-                    ok = not any(m in low for m in (
-                        "error:", "failed", "traceback", "hit the tool-round"))
-                record_outcome(self._tasks[task_id]["agent"], "implement", ok)
+                record_outcome(session["agent"], "implement", session["state"] == "completed")
             except Exception:
                 pass
         return status
 
     def list_sessions(self) -> list[dict]:
-        sessions = []
-        for tid, task in self._tasks.items():
-            alive = self._procs[tid].poll() is None
-            sessions.append({"id": tid, "provider": task["agent"],
-                              "session_state": "live" if alive else "exited",
-                              "title": task["spec"][:60]})
-        return sessions
+        return self.sessions.list()
 
     def read_transcript(self, session_id: str, tail: int | None = None) -> str:
-        t = Path.home() / ".aiko" / "transcripts" / f"{session_id}.log"
-        if not t.exists():
+        try:
+            return self.sessions.read_transcript(session_id, tail)
+        except ValueError:
             return f"(no transcript for {session_id})"
-        text = t.read_text(errors="replace")
-        if tail:
-            return text[-tail:]
-        return text
 
     def send_to_session(self, session_id: str, text: str) -> dict:
-        proc = self._procs.get(session_id)
-        if not proc or proc.poll() is not None:
-            return {"error": "session not alive"}
-        return {"error": "one-shot local agents can't receive input mid-run, nya"}
+        try:
+            return self.sessions.send_input(session_id, text)
+        except (ValueError, RuntimeError, OSError) as exc:
+            return {"error": str(exc)}
+
+    def session_story(self, session_id: str) -> dict:
+        try:
+            session = self.sessions.get(session_id)
+        except ValueError:
+            return {"error": "unknown session"}
+        return {"goal": {"id": session_id, "text": session["title"],
+                         "status": session["state"], "by": "local"},
+                "tasks": [{**session, "parent": None}], "sessions": [session],
+                "decisions": {}, "orchestrator_replies": {}}
 
 
 # ── Server backend — one or more aikod daemons ───────────────────
@@ -307,14 +289,7 @@ class AllBackends(Backend):
 
     def session_story(self, session_id: str) -> dict:
         if session_id.startswith("local-"):
-            return {"goal": {"id": session_id, "text": "(local dispatch)",
-                             "status": "-", "by": "local"},
-                    "tasks": [{"id": session_id, "parent": None,
-                               "title": "(local dispatch)", "state": "-",
-                               "provider": "local", "model": "-"}],
-                    "sessions": [{"id": session_id, "task_id": session_id,
-                                 "provider": "local", "model": "-", "state": "-"}],
-                    "decisions": {}, "orchestrator_replies": {}}
+            return self.local.session_story(session_id)
         if self.remote:
             return self.remote.session_story(session_id)
         return {}

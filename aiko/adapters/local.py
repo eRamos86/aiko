@@ -1,122 +1,75 @@
-"""Local (Mac-direct) provider adapters — D2's locality=local path.
-
-Same Protocol as the server adapters, but each spawns the binary directly in a
-subprocess on this machine. No tmux, no daemon hop.
-"""
-import subprocess
+"""Local provider adapters backed by durable direct tmux sessions."""
 from pathlib import Path
 
 from .base import LocalAdapterManifest
+from ..session_manager import SessionManager
 
 
-class LocalHermesAdapter:
+class _LocalAdapter:
+    command: str
+    one_shot: list[str]
+
+    def _manager(self):
+        # Importing the adapter registry must not create a database.
+        manager = SessionManager()
+        provider = self.manifest.provider_id
+        manager.agents.setdefault(provider, {"name": provider, "command": self.command,
+                                            "one_shot": self.one_shot})
+        return manager
+
+    def health(self) -> dict:
+        from shutil import which
+        return {"ok": which(self.command) is not None and which("tmux") is not None,
+                "where": which(self.command), "tmux": which("tmux")}
+
+    def spawn(self, task: dict, bundle_path: str) -> str:
+        prompt = task["spec"] + "\n\n# Context bundle\n" + Path(bundle_path).read_text()
+        row = self._manager().dispatch(
+            self.manifest.provider_id,
+            task.get("worktree_path") or task.get("cwd") or str(Path.cwd()),
+            prompt, repo_direct=task.get("repo_direct") is True)
+        return row["id"]
+
+    def status(self, sid: str) -> dict:
+        try:
+            row = self._manager().get(sid)
+        except ValueError:
+            return {"alive": False, "state": "unknown"}
+        return {"alive": row["state"] == "running", "state": row["state"],
+                "exit_code": row["exit_code"], "session_id": sid}
+
+    def send_input(self, sid: str, text: str) -> None:
+        result = self._manager().send_input(sid, text)
+        if "error" in result:
+            raise RuntimeError(result["error"])
+
+    def kill(self, sid: str) -> None:
+        self._manager().stop(sid)
+
+
+class LocalHermesAdapter(_LocalAdapter):
     manifest = LocalAdapterManifest(
         provider_id="hermes",
         models=["gpt-5.6-luna", "nvidia/nemotron-3-ultra-550b-a55b"],
         concurrency_limit=2,
     )
-
-    def health(self) -> dict:
-        from shutil import which
-        return {"ok": which("hermes") is not None, "where": which("hermes")}
-
-    def spawn(self, task: dict, bundle_path: str) -> str:
-        sid = task["id"]
-        transcript = Path.home() / ".aiko" / "transcripts" / f"{sid}.hermes.local.jsonl"
-        transcript.parent.mkdir(parents=True, exist_ok=True)
-        prompt = task["spec"] + "\n\n# Context bundle\n" + Path(bundle_path).read_text()
-        cmd = ["hermes", "chat", "-q", prompt]
-        proc = subprocess.Popen(cmd, stdout=transcript.open("w"), stderr=subprocess.STDOUT)
-        self._proc = proc
-        return sid
-
-    def status(self, sid: str) -> dict:
-        proc = getattr(self, "_proc", None)
-        if proc and proc.poll() is None:
-            return {"alive": True, "pid": proc.pid}
-        return {"alive": False}
-
-    def send_input(self, sid: str, text: str) -> None:
-        raise NotImplementedError("local hermes one-shot only")
-
-    def kill(self, sid: str) -> None:
-        proc = getattr(self, "_proc", None)
-        if proc and proc.poll() is None:
-            proc.terminate()
+    command = "hermes"
+    one_shot = ["chat", "-q", "{prompt}"]
 
 
-class LocalCodexAdapter:
-    manifest = LocalAdapterManifest(
-        provider_id="codex",
-        models=["gpt-5.5"],
-        concurrency_limit=2,
-    )
-
-    def health(self) -> dict:
-        from shutil import which
-        return {"ok": which("codex") is not None, "where": which("codex")}
-
-    def spawn(self, task: dict, bundle_path: str) -> str:
-        sid = task["id"]
-        transcript = Path.home() / ".aiko" / "transcripts" / f"{sid}.codex.local.jsonl"
-        transcript.parent.mkdir(parents=True, exist_ok=True)
-        prompt = task["spec"] + "\n\n# Context bundle\n" + Path(bundle_path).read_text()
-        cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
-               prompt]
-        proc = subprocess.Popen(cmd, stdout=transcript.open("w"), stderr=subprocess.STDOUT)
-        self._proc = proc
-        return sid
-
-    def status(self, sid: str) -> dict:
-        proc = getattr(self, "_proc", None)
-        if proc and proc.poll() is None:
-            return {"alive": True, "pid": proc.pid}
-        return {"alive": False}
-
-    def send_input(self, sid: str, text: str) -> None:
-        raise NotImplementedError("local codex one-shot only")
-
-    def kill(self, sid: str) -> None:
-        proc = getattr(self, "_proc", None)
-        if proc and proc.poll() is None:
-            proc.terminate()
+class LocalCodexAdapter(_LocalAdapter):
+    manifest = LocalAdapterManifest(provider_id="codex", models=["gpt-5.5"],
+                                    concurrency_limit=2)
+    command = "codex"
+    one_shot = ["exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "{prompt}"]
 
 
-class LocalAGYAdapter:
-    manifest = LocalAdapterManifest(
-        provider_id="antigravity",
-        models=["gemini-3-pro", "gemini-3-flash"],
-        concurrency_limit=2,
-    )
-
-    def health(self) -> dict:
-        from shutil import which
-        return {"ok": which("agy") is not None, "where": which("agy")}
-
-    def spawn(self, task: dict, bundle_path: str) -> str:
-        sid = task["id"]
-        transcript = Path.home() / ".aiko" / "transcripts" / f"{sid}.agy.local.jsonl"
-        transcript.parent.mkdir(parents=True, exist_ok=True)
-        prompt = task["spec"] + "\n\n# Context bundle\n" + Path(bundle_path).read_text()
-        # AGY: prompt attaches to the flag (verified Phase 0)
-        cmd = ["agy", "--output-format", "text", f"--print={prompt}"]
-        proc = subprocess.Popen(cmd, stdout=transcript.open("w"), stderr=subprocess.STDOUT)
-        self._proc = proc
-        return sid
-
-    def status(self, sid: str) -> dict:
-        proc = getattr(self, "_proc", None)
-        if proc and proc.poll() is None:
-            return {"alive": True, "pid": proc.pid}
-        return {"alive": False}
-
-    def send_input(self, sid: str, text: str) -> None:
-        raise NotImplementedError("local agy one-shot only")
-
-    def kill(self, sid: str) -> None:
-        proc = getattr(self, "_proc", None)
-        if proc and proc.poll() is None:
-            proc.terminate()
+class LocalAGYAdapter(_LocalAdapter):
+    manifest = LocalAdapterManifest(provider_id="antigravity",
+                                    models=["gemini-3-pro", "gemini-3-flash"],
+                                    concurrency_limit=2)
+    command = "agy"
+    one_shot = ["--output-format", "text", "--print={prompt}"]
 
 
 LOCAL_ADAPTERS = {

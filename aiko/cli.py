@@ -159,5 +159,107 @@ def usage_set(key: str, unit: str, cap: int, window: str):
                f"window={result['window']}s, nya~")
 
 
+@app.command("update")
+def update_command(
+    wheel: Path | None = typer.Option(None, "--wheel", help="Install this built wheel on all configured hosts"),
+    local_only: bool = typer.Option(False, "--local-only", help="Update only this installation"),
+):
+    """Stage a new release and update configured servers; running workers stay alive."""
+    import json
+    from .updates import update
+    try:
+        result = update(wheel=wheel, local_only=local_only)
+        typer.echo(json.dumps(result, indent=2, default=str))
+        if result.get("status") in ("failed", "partial", "error"):
+            raise typer.Exit(1)
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(f"Update failed: {exc}", err=True)
+        raise typer.Exit(1)
+
+
+@app.command("update-tool")
+def update_tool_command(name: str, target: str = typer.Option("local", "--target", "-t")):
+    """Update an AI tool, or queue it until all of its sessions are idle."""
+    import json
+    from .updates import update_tool
+    try:
+        result = update_tool(name, target)
+        typer.echo(json.dumps(result, indent=2, default=str))
+        if result.get("status") in ("failed", "error"):
+            raise typer.Exit(1)
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+
+@app.command("updates-pending")
+def updates_pending():
+    """Retry queued tool updates that are now idle. The TUI also retries periodically."""
+    import json
+    from .updates import run_pending_updates
+    typer.echo(json.dumps(run_pending_updates(), indent=2, default=str))
+
+
+@app.command("open")
+def open_agent(
+    agent: str,
+    repo: str = typer.Option(..., "--repo", "-C", help="Working directory on the selected host"),
+    target: str = typer.Option("local", "--target", "-t"),
+    detached: bool = typer.Option(False, "--detached", help="Launch without attaching this terminal"),
+):
+    """Open a persistent independent AI terminal; Ctrl+B, D detaches."""
+    import subprocess
+    import json
+    from .session_manager import SessionManager
+    try:
+        manager = SessionManager()
+        result = manager.open(agent, repo, target)
+        typer.echo(json.dumps(result, indent=2, default=str))
+        if not detached:
+            subprocess.run(manager.attach_command(result["id"], target), check=False)
+    except (ValueError, RuntimeError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+
+@app.command("attach")
+def attach_agent(session_id: str, target: str = typer.Option("local", "--target", "-t")):
+    """Return to a persistent AI terminal."""
+    import subprocess
+    from .session_manager import SessionManager
+    try:
+        subprocess.run(SessionManager().attach_command(session_id, target), check=True)
+    except Exception as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+
+
+@app.command("sessions")
+def direct_sessions():
+    """List independent terminals across configured hosts."""
+    import json
+    from .session_manager import SessionManager
+    typer.echo(json.dumps(SessionManager().list(), indent=2, default=str))
+
+
+@app.command("skills")
+def skills(name: str | None = typer.Argument(None)):
+    """List available skills or read one by name."""
+    from .skills import list_skills, read_skill
+    if name:
+        typer.echo(read_skill(name))
+    else:
+        for skill in list_skills():
+            typer.echo(f"{skill['name']}: {skill['description']}")
+
+
+@app.command("version")
+def version():
+    """Show installed package version and runtime location."""
+    from importlib.metadata import version as package_version
+    import sys
+    typer.echo(f"Aiko {package_version('aiko')}\n{sys.prefix}")
+
+
 if __name__ == "__main__":
     app()

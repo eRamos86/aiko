@@ -68,7 +68,8 @@ def _depth(prompt: str) -> int:
     return int(m.group(1)) if m else 0
 
 
-def spawn(caller, spec: dict, prompt: str, prefer: str | None = None) -> dict:
+def spawn(caller, spec: dict, prompt: str, prefer: str | None = None, *,
+          skills: list[str] | None = None) -> dict:
     """Spawn one subagent. `caller` is the Orchestrator (has .brain/.backend.)
 
     Returns {host, subagent, result|task_id, depth, duration_s}.
@@ -77,7 +78,7 @@ def spawn(caller, spec: dict, prompt: str, prefer: str | None = None) -> dict:
     body = spec.get("prompt") or spec.get("body") or ""
     tools = spec.get("tools") or []
     depth = _depth(prompt) + 1
-    sys_prompt = (f"You are {name}, a specialist subagent in Ace's agent "
+    sys_prompt = (f"You are {name}, a specialist subagent in the user's agent "
                   f"pool. {body}\n\nStay strictly in-role; return concise, "
                   f"actionable output. Depth marker: [spawn-depth:{depth}]")
     started = time.time()
@@ -88,6 +89,13 @@ def spawn(caller, spec: dict, prompt: str, prefer: str | None = None) -> dict:
     result: dict = {"host": "self", "subagent": name, "depth": depth}
     success = False
     try:
+        selected = spec.get("skills") if skills is None else skills
+        if selected:
+            from .skills import SkillLibrary
+            library = getattr(caller, "skills", None)
+            if library is None:
+                library = SkillLibrary.from_config()
+            prompt = library.attach(prompt, selected)
         if host_pref == "self" or host_pref is None and is_light:
             r = caller.brain.complete(
                 [{"role": "system", "content": sys_prompt},

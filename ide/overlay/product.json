@@ -1,0 +1,14 @@
+{
+  "nameShort": "Aiko",
+  "nameLong": "Aiko IDE",
+  "applicationName": "aiko",
+  "dataFolderName": ".aiko-ide",
+  "urlProtocol": "aiko",
+  "win32AppUserModelId": "com.eramos.aiko",
+  "win32MutexName": "aikoide",
+  "darwinBundleIdentifier": "us.eramos.aiko",
+  "linuxIconName": "aiko",
+  "win32DirName": "Aiko",
+  "licenseName": "MIT",
+  "licenseUrl": "https://github.com/eRamos86/aiko/blob/main/LICENSE"
+}

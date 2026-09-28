@@ -58,9 +58,9 @@ class AGYAdapter:
     def status(self, session_id: str) -> dict:
         try:
             r = requests.get(f"{AGY_BRIDGE_URL}/status/{session_id}", headers=self._headers(), timeout=3)
-            return r.json() if r.ok else {"alive": False}
+            return r.json() if r.ok else {"unknown": True}
         except Exception:
-            return {"alive": False}
+            return {"unknown": True}
 
     def send_input(self, session_id: str, text: str) -> None:
         requests.post(f"{AGY_BRIDGE_URL}/send/{session_id}",

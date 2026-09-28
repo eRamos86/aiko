@@ -40,14 +40,15 @@ default_brain: nim-nemotron-super
 # ── Backend: where work runs ─────────────────────────────────
 # local   = orchestrate agents on THIS machine only (no server needed!)
 # servers = dispatch work to one or more aikod daemons (below)
-backend: servers
-
-servers:
-  - name: poopmachine
-    url: https://aikod.eramos.us
-    auth: nova_jwt                  # none | token | nova_jwt
-    # token auth: set AIKO_TOKEN_<NAME> env or auth_token: here
-    # nova_jwt: `aiko login` (Nova) or auth_token + auth_refresh_token
+backend: local
+servers: []
+# Example server (optional):
+# - name: my-server
+#   url: http://127.0.0.1:4090
+#   ssh_host: my-ssh-alias
+#   auth: token
+#   auth_token: "${AIKO_SERVER_TOKEN}"
+#   restart_command: [sudo, -n, systemctl, restart, aikod]
 
 # ── Local agents (spawned directly, no server involved) ──────
 # Used in local mode AND available to the orchestrator anytime.
@@ -61,19 +62,21 @@ agents:
   - name: antigravity
     command: agy
     one_shot: ["--output-format", "text", "--print={prompt}"]
+  - name: opencode
+    command: opencode
+    interactive: ["opencode"]
+    one_shot: ["run", "{prompt}"]
 
 # ── Context providers (optional plugin — Aiko runs fine without) ──
 # Aiko attaches each provider's docs to worker prompts when set.
 # type http_docs: any read API returning {"content": ...} for a path.
-context_providers:
-  - name: obsidian-vault
-    type: http_docs
-    base_url: https://vault.eramos.us
-    headers:
-      X-Vault-Secret: "${VAULT_API_SECRET}"
-    attach:
-      - Agents/Agents.md
-      - Agents/Shared-Context.md
+context_providers: []
+
+# Application releases and user state live outside the source checkout.
+# Set updates.source to your development checkout to build with `aiko update`.
+updates: {}
+skills:
+  directories: []
 """
 
 

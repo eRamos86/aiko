@@ -5,6 +5,7 @@ active/inactive sorted by client→agent, concord opens on tab activation,
 /new replaces /reset, /plan for braindumps.
 """
 import json
+import asyncio
 import subprocess
 import threading
 from pathlib import Path
@@ -36,6 +37,10 @@ HELP_TEXT = """[b pink]Aiko slash commands[/b pink]
   [sky]/targets[/sky]          list execution targets (local + servers)
   [sky]/usage[/sky]            usage economy: budgets, consumption, cooldowns
   [sky]/status[/sky]           quick session + target overview
+  [sky]/agents[/sky]           open the independent agent terminal tab
+  [sky]/skills[/sky]           browse bundled and user skills
+  [sky]/update[/sky]           install Aiko updates locally and on servers
+  [sky]/update-tool[/sky] NAME [TARGET]   update a tool when idle
   [sky]/new[/sky]              fresh conversation (same brain)
   [sky]/clear[/sky]            clear the chat log
   [sky]/help[/sky]             this message
@@ -266,6 +271,9 @@ class AikoTUI(App):
     #attach_input { dock: bottom; border: tall #87d7ff; background: #14142a; }
     #status_log { height: 1fr; border: round #d75fd7; background: #12121f; }
     #concord_msg { padding: 1 2; border: round #d75fd7; color: #d75fd7; }
+    #direct_form { height: auto; padding: 1; }
+    #direct_list { height: 1fr; border: round #87d7ff; }
+    #direct_hint { height: auto; padding: 1; color: #87d7ff; }
     Tabs { background: #1a1a2e; }
     Tabs > Tab { padding: 0 2; color: #6c6c8a; }
     Tabs > Tab.-active { color: #ffafff; }
@@ -279,6 +287,7 @@ class AikoTUI(App):
         Binding("ctrl+2", "tab_sessions", "Sessions", priority=True),
         Binding("ctrl+3", "tab_concord", "Concord", priority=True),
         Binding("ctrl+4", "tab_status", "Status", priority=True),
+        Binding("ctrl+5", "tab_agents", "Agents", priority=True),
         Binding("ctrl+v", "pager", "Pager", priority=True),
         Binding("v", "pager", "Pager/copy", priority=True),
         Binding("ctrl+m", "toggle_mouse", "Mouse copy", priority=True),
@@ -287,6 +296,7 @@ class AikoTUI(App):
         Binding("2", "tab_sessions", "Sessions", priority=True),
         Binding("3", "tab_concord", "Concord", priority=True),
         Binding("4", "tab_status", "Status", priority=True),
+        Binding("5", "tab_agents", "Agents", priority=True),
     ]
 
     TITLE = "🐾 Aiko — Agent Orchestrator"
@@ -297,12 +307,19 @@ class AikoTUI(App):
         self.backend = get_backend()
         self.orchestrator: Orchestrator | None = None
         self.busy = False
+        self._pending: list[str] = []
         self.attached: str | None = None
         self._concord_open = False
         self._story_sessions: list[dict] = []
         self._story_active_tab: int = 0
         self._transcript_len: dict[str, int] = {}
         self._transcript_head: dict[str, str] = {}
+        self._direct_rows: list[dict] = []
+        self._direct_refreshing = False
+        self._updates_running = False
+        from .history import ConversationStore
+        self._history_store = ConversationStore()
+        self._conversation_id, self._saved_history = self._history_store.latest()
 
     # ── composition ────────────────────────────────────────────
 
@@ -336,6 +353,23 @@ class AikoTUI(App):
                 yield Static("", id="concord_msg")
             with TabPane("📊 Status", id="status"):
                 yield RichLog(id="status_log", wrap=True, markup=True)
+            with TabPane("Agents", id="agents"):
+                from .config import load_config
+                cfg = load_config()
+                agents = [(a["name"], a["name"]) for a in cfg.get("agents", [])]
+                targets = [("This Mac / local", "local")] + [
+                    (s["name"], s["name"]) for s in cfg.get("servers", []) if s.get("ssh_host")]
+                with Vertical(id="direct_form"):
+                    yield Select(agents or [("No configured tools", "")],
+                                 id="direct_agent", prompt="Choose an AI tool")
+                    yield Select(targets, value="local", allow_blank=False, id="direct_target")
+                    yield Input(placeholder="Repository path on the selected machine", id="direct_cwd")
+                    yield Button("Open agent terminal", id="direct_open")
+                    yield Button("Refresh sessions", id="direct_refresh")
+                yield Static("Choose a tool, machine, and repository. Select a session to return to it. "
+                             "Inside a terminal: Ctrl+B, then D returns to Aiko and leaves it running.",
+                             id="direct_hint")
+                yield ListView(id="direct_list")
         yield Static("", id="status_bar")
         yield Footer()
 
@@ -391,14 +425,19 @@ class AikoTUI(App):
                 provider, model = default.split(":", 1)
                 try:
                     from .brain import Brain as _B
-                    self.orchestrator.brain = _B.from_provider_model(provider, model)
+                    # orchestrator may not exist yet — create it (fresh history,
+                    # same system prompt) instead of assigning to .brain of None
+                    self.orchestrator = Orchestrator(
+                        brain=_B.from_provider_model(provider, model),
+                        backend=self.backend)
                     self._update_brain_label()
                 except Exception:
                     first = next((b["name"] for b in brains if b["name"] == default),
                                  brains[0]["name"])
                     select = self.query_one("#brain_select", Select)
                     select.value = first
-                    self._set_brain(first)
+                    # boot fallback must NOT rewrite the user's saved choice
+                    self._set_brain(first, persist=False)
             else:
                 first = next((b["name"] for b in brains if b["name"] == default),
                              brains[0]["name"])
@@ -423,6 +462,7 @@ class AikoTUI(App):
         self.set_interval(4.0, self._tick_attached)
         self.set_interval(10.0, self._tick_status)
         self.set_interval(8.0, self._tick_status_bar)
+        self.set_interval(30.0, self._retry_tool_updates)
         self.query_one("#chat_input", Input).focus()
 
     # ── tab activation → concord ────────────────────────────────
@@ -432,19 +472,34 @@ class AikoTUI(App):
         pane_id = getattr(pane_id, "id", pane_id)
         if pane_id == "concord" and not self._concord_open:
             self.action_launch_concord()
+        elif pane_id == "agents":
+            self.run_worker(self._refresh_direct_sessions())
 
     # ── brain / chat ───────────────────────────────────────────
 
-    def _set_brain(self, name: str, reasoning: str | None = None) -> None:
+    def _set_brain(self, name: str, reasoning: str | None = None,
+                   persist: bool = True) -> None:
         try:
             if not self.orchestrator:
                 self.orchestrator = Orchestrator(brain=Brain(name=name),
                                                 backend=self.backend)
+                if self._saved_history:
+                    from .history import resumable_history
+                    restored = resumable_history(self._saved_history)
+                    self.orchestrator.history = [self.orchestrator.history[0]] + [
+                        m for m in restored if m.get("role") != "system"]
+                    self.query_one("#chat_log", RichLog).write("[dim]Previous conversation restored.[/dim]")
+                    for message in restored:
+                        if message.get("role") in ("user", "assistant") and message.get("content"):
+                            self.query_one("#chat_log", RichLog).write(
+                                f"{message['role']}: {self._esc(str(message['content']))}")
+                    self._saved_history = []
             else:
                 self.orchestrator.switch_brain(name)
             if reasoning and self.orchestrator:
                 self.orchestrator.brain.set_reasoning(reasoning)
-            self._persist_default_brain(name)
+            if persist:
+                self._persist_default_brain(name)
             self._update_brain_label()
         except RuntimeError as e:
             self.query_one("#brain_label", Static).update(f"🐾 [red]{e}[/red]")
@@ -473,6 +528,12 @@ class AikoTUI(App):
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "reset_btn":
             self._slash_new()
+        elif event.button.id == "direct_open":
+            self.run_worker(self._open_direct_session(), exclusive=True, group="direct-open")
+        elif event.button.id == "direct_refresh":
+            self.run_worker(self._refresh_direct_sessions())
+        elif event.button.id == "refresh_btn":
+            self._tick_sessions()
 
     async def on_input_submitted(self, event: Input.Submitted) -> None:
         if event.input.id == "chat_input":
@@ -494,6 +555,34 @@ class AikoTUI(App):
 
         if cmd == "/help":
             log.write(HELP_TEXT)
+        elif cmd == "/agents":
+            self._activate("agents")
+        elif cmd == "/skills":
+            from .skills import list_skills
+            for skill in list_skills():
+                log.write(self._esc(f"{skill['name']}: {skill['description']}"))
+        elif cmd in ("/update", "/update-tool"):
+            if self._updates_running:
+                log.write("An update is already in progress.")
+                return
+            self._updates_running = True
+            try:
+                from .updates import update, update_tool
+                if cmd == "/update":
+                    log.write("Preparing Aiko update. Existing worker sessions stay running.")
+                    result = await asyncio.to_thread(update)
+                else:
+                    args = arg.split()
+                    if not args:
+                        log.write("Usage: /update-tool NAME [TARGET]")
+                        return
+                    result = await asyncio.to_thread(update_tool, args[0],
+                                                     args[1] if len(args) > 1 else "local")
+                log.write(self._esc(json.dumps(result, indent=2)))
+            except Exception as exc:
+                log.write(self._esc(f"Update failed: {exc}"))
+            finally:
+                self._updates_running = False
         elif cmd == "/clear":
             log.clear()
             log.write("[i gray]log cleared, fresh screen nya~[/i gray]")
@@ -600,6 +689,11 @@ class AikoTUI(App):
             log.write(f"[red]unknown command {cmd}[/red] — /help for the list, mrrp")
 
     def _slash_new(self) -> None:
+        if self.busy:
+            self.notify("Wait for the current turn before starting a new conversation.")
+            return
+        self._history_store.archive(self._conversation_id)
+        self._conversation_id, self._saved_history = self._history_store.latest()
         if self.orchestrator:
             self.orchestrator.reset()
         log = self.query_one("#chat_log", RichLog)
@@ -628,12 +722,14 @@ class AikoTUI(App):
             return
         input_box.value = ""
         log = self.query_one("#chat_log", RichLog)
-        log.write(f"[b mint]you[/b mint]  {text}")
+        log.write(f"[b mint]you[/b mint]  {self._esc(text)}")
         if not self.orchestrator:
             log.write("[red]no brain — configure ~/.aiko/config.yaml[/red]")
             return
         if self.busy:
-            log.write("[i gray](Aiko is still thinking, one moment~)[/i gray]")
+            log.write("[i gray](Aiko is still thinking — your message was queued, "
+                      "she'll get to it right after, nya~)[/i gray]")
+            self._pending.append(text)
             return
         self.busy = True
         self._run_stream(text)
@@ -671,6 +767,7 @@ class AikoTUI(App):
         return text.replace("[", "\\[")
 
     def _on_stream_event(self, evt: dict) -> None:
+        self._save_conversation()
         try:
             sv = self.query_one("#stream_view", Static)
         except Exception:
@@ -687,7 +784,7 @@ class AikoTUI(App):
                 self._stream_tools[-1] += " ✓"
         elif kind == "reply":
             self.query_one("#chat_log", RichLog).write(
-                f"[b pink]Aiko[/b pink]  {evt.get('content', '')}")
+                f"[b pink]Aiko[/b pink]  {self._esc(evt.get('content', ''))}")
             self._stream_think = self._stream_text = ""
             self._stream_tools = []
             sv.remove_class("on")
@@ -706,10 +803,16 @@ class AikoTUI(App):
 
     def _write_reply(self, reply: str) -> None:
         self.query_one("#chat_log", RichLog).write(
-            f"[b pink]Aiko[/b pink]  {reply}")
+            f"[b pink]Aiko[/b pink]  {self._esc(reply)}")
 
     def _chat_done(self) -> None:
         self.busy = False
+        # queued message? send it as the next turn now that we're free
+        if self._pending:
+            queued = self._pending.pop(0)
+            self.busy = True
+            self._run_stream(queued)
+            return
         try:
             self.query_one("#chat_input", Input).placeholder = \
                 "message Aiko… (Enter to send, /help for commands)"
@@ -758,6 +861,15 @@ class AikoTUI(App):
         self._session_rows = active + inactive
 
     def on_list_view_selected(self, event: ListView.Selected) -> None:
+        if event.list_view.id == "direct_list":
+            index = event.list_view.index
+            if index is not None and 0 <= index < len(self._direct_rows):
+                row = self._direct_rows[index]
+                try:
+                    self._enter_direct_terminal(row["id"], row.get("target", "local"))
+                except Exception as exc:
+                    self.notify(f"Cannot attach: {exc}", severity="error")
+            return
         if event.list_view.id != "session_list":
             return
         # section headers occupy indices; map selection to nearest session row
@@ -1007,7 +1119,7 @@ class AikoTUI(App):
         """
         focused = self.focused
         key = getattr(event, "key", "")
-        tab_map = {"1": "chat", "2": "sessions", "3": "concord", "4": "status"}
+        tab_map = {"1": "chat", "2": "sessions", "3": "concord", "4": "status", "5": "agents"}
         if key in tab_map and isinstance(focused, Input):
             if not focused.value:
                 event.stop()
@@ -1100,6 +1212,71 @@ class AikoTUI(App):
     def action_tab_sessions(self) -> None: self._activate("sessions")
     def action_tab_concord(self) -> None: self._activate("concord")
     def action_tab_status(self) -> None: self._activate("status")
+    def action_tab_agents(self) -> None: self._activate("agents")
+
+    def _save_conversation(self):
+        if self.orchestrator:
+            self._history_store.save(self._conversation_id, self.orchestrator.history)
+
+    def on_unmount(self):
+        self._save_conversation()
+
+    def _retry_tool_updates(self):
+        if not self._updates_running:
+            self.run_worker(self._run_pending_updates(), exclusive=True, group="tool-updates")
+
+    async def _run_pending_updates(self):
+        self._updates_running = True
+        try:
+            from .updates import run_pending_updates
+            results = await asyncio.to_thread(run_pending_updates)
+            for result in results:
+                if result.get("status") not in ("deferred", "busy"):
+                    self.notify(str(result))
+        except Exception as exc:
+            self.notify(f"Pending updates: {exc}", severity="warning")
+        finally:
+            self._updates_running = False
+
+    async def _refresh_direct_sessions(self):
+        if self._direct_refreshing:
+            return
+        self._direct_refreshing = True
+        try:
+            from .session_manager import SessionManager
+            self._direct_rows = await asyncio.to_thread(SessionManager().list)
+            view = self.query_one("#direct_list", ListView)
+            await view.clear()
+            for row in self._direct_rows:
+                label = f"{row.get('target', 'local')} · {row.get('agent', '?')} · " \
+                        f"{row.get('state', '?')} · {row.get('cwd', '')}"
+                await view.append(ListItem(Static(label, markup=False)))
+        except Exception as exc:
+            self.notify(f"Cannot load agent sessions: {exc}", severity="error")
+        finally:
+            self._direct_refreshing = False
+
+    async def _open_direct_session(self):
+        agent = self.query_one("#direct_agent", Select).value
+        target = self.query_one("#direct_target", Select).value
+        cwd = self.query_one("#direct_cwd", Input).value.strip()
+        if agent is Select.BLANK or not agent or not cwd:
+            self.notify("Select an AI tool and enter its repository path.")
+            return
+        try:
+            from .session_manager import SessionManager
+            manager = SessionManager()
+            row = await asyncio.to_thread(manager.open, str(agent), cwd, str(target))
+            self._enter_direct_terminal(row["id"], str(target))
+            await self._refresh_direct_sessions()
+        except Exception as exc:
+            self.notify(f"Cannot open session: {exc}", severity="error")
+
+    def _enter_direct_terminal(self, sid: str, target: str):
+        from .session_manager import SessionManager
+        command = SessionManager().attach_command(sid, target)
+        with self.suspend():
+            subprocess.run(command, check=False)
 
 
 def run_tui():

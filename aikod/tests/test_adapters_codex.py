@@ -31,6 +31,6 @@ def test_spawn_uses_tmux(mock_run, tmp_path, monkeypatch):
     sid = a.spawn(task, str(bundle))
     assert sid == "sess-9"
     cmd = mock_run.call_args[0][0]
-    assert "tmux new-session" in cmd
-    assert "codex exec" in cmd
-    assert "gpt-5.5" in cmd
+    assert cmd[:5] == ["tmux", "-L", "aiko-workers", "new-session", "-d"]
+    assert "codex exec" in cmd[-1]
+    assert "gpt-5.5" in cmd[-1]

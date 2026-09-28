@@ -72,3 +72,26 @@ def test_expired_token_rejected(client):
     r = client.post("/goals", json={"text": "x"},
                     headers={"Authorization": f"Bearer {tok}"})
     assert r.status_code == 401
+
+
+def test_approval_inbox_and_single_decision(client, tmp_path):
+    token = make_token()
+    created = client.post("/goals", json={"text": "deploy aiko"},
+                          headers={"Authorization": f"Bearer {token}"}).json()
+    db = connect(tmp_path / "aikod.db")
+    db.execute("INSERT INTO approval VALUES (?,?,?,?,?,?,?,?)",
+               ("approval-1", created["task_id"], "deploy", "abc123", "2026-09-28T00:00:00Z",
+                None, None, None))
+    inbox = client.get("/approvals", headers={"Authorization": f"Bearer {token}"})
+    assert inbox.status_code == 200
+    assert inbox.json()["approvals"] == [{
+        "id": "approval-1", "task_id": created["task_id"], "action": "deploy",
+        "payload_digest": "abc123", "requested_at": "2026-09-28T00:00:00Z",
+        "decided_at": None, "decision": None, "title": "deploy aiko",
+    }]
+    decided = client.post("/approvals/approval-1/decision", json={"decision": "granted"},
+                          headers={"Authorization": f"Bearer {token}"})
+    assert decided.status_code == 200
+    assert decided.json()["decision"] == "granted"
+    assert client.post("/approvals/approval-1/decision", json={"decision": "denied"},
+                       headers={"Authorization": f"Bearer {token}"}).status_code == 409

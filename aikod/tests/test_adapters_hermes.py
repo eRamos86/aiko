@@ -39,16 +39,16 @@ def test_spawn_uses_tmux_without_model_flag(mock_run, tmp_path, monkeypatch):
     assert sid == "sess-1"
     mock_run.assert_called_once()
     cmd = mock_run.call_args[0][0]
-    assert "tmux new-session" in cmd
+    assert cmd[:5] == ["tmux", "-L", "aiko-workers", "new-session", "-d"]
     assert "aiko-sess-1" in cmd
-    assert "chat -q" in cmd
-    assert "-m" not in cmd  # model comes from server hermes config
+    assert "chat -q" in cmd[-1]
+    assert "-m" not in cmd[-1]  # model comes from server hermes config
 
 
 @patch("aikod.adapters.hermes.subprocess.run")
 def test_status(mock_run):
-    mock_run.return_value = MagicMock(returncode=0)
+    mock_run.return_value = MagicMock(returncode=0, stdout="0|\n", stderr="")
     a = HermesAdapter()
     assert a.status("sess-1")["alive"] is True
-    mock_run.return_value = MagicMock(returncode=1)
+    mock_run.return_value = MagicMock(returncode=1, stdout="", stderr="no server running")
     assert a.status("sess-1")["alive"] is False

@@ -1,12 +1,15 @@
-"""FastAPI daemon surface. Auth = Nova JWT (ADR-009): HS256, payload {id, email}."""
+"""Daemon API: explicit bearer token or existing Nova JWT; closed by default."""
 import time
 import uuid
+import secrets
+import sys
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 import jwt as pyjwt
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
-from .db import connect, hash_token
+from .db import connect, database
 from .events import append, get_for_session
 
 
@@ -58,19 +61,24 @@ def build_story(conn, sid: str) -> dict | None:
     }
 
 
-def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
+def create_app(db_path, nova_jwt_secret: str | None = None, auth_token: str | None = None) -> FastAPI:
     import os
-    secret = nova_jwt_secret or os.environ.get("NOVA_JWT_SECRET", "")
+    secret = nova_jwt_secret if nova_jwt_secret is not None else os.environ.get("NOVA_JWT_SECRET", "")
+    daemon_token = auth_token if auth_token is not None else os.environ.get("AIKOD_AUTH_TOKEN", "")
     app = FastAPI(title="aikod", version="0.1.0")
     db_path = Path(db_path)
 
     def require_nova_user(authorization: str | None = Header(default=None)) -> dict:
         """Verify a Nova-issued JWT. Returns the payload {id, email}."""
-        if not secret:
-            raise HTTPException(500, "NOVA_JWT_SECRET not configured")
+        if not secret and not daemon_token:
+            raise HTTPException(503, "daemon authentication is not configured")
         if not authorization or not authorization.startswith("Bearer "):
             raise HTTPException(401, "missing or bad token format")
         token = authorization[len("Bearer "):]
+        if daemon_token and secrets.compare_digest(token.encode(), daemon_token.encode()):
+            return {"id": "daemon", "email": "daemon-token"}
+        if not secret:
+            raise HTTPException(401, "invalid token")
         try:
             payload = pyjwt.decode(token, secret, algorithms=["HS256"])
         except pyjwt.ExpiredSignatureError:
@@ -85,12 +93,35 @@ def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
     def health():
         from .adapters.registry import ADAPTERS
         from .router import ROUTER_YAML_PATH, OBSERVED_PATH
+        try:
+            package_version = version("aiko")
+        except PackageNotFoundError:
+            package_version = "unknown"
         return {
             "status": "ok",
-            "adapters": {k: v.health() for k, v in ADAPTERS.items()},
+            "version": package_version,
+            "runtime": str(Path(sys.prefix).resolve()),
+            "runtime_path": str(Path(__file__).resolve().parent),
+            "control_protocol": 1,
+            "adapters": list(ADAPTERS),
             "router_yaml_present": ROUTER_YAML_PATH.exists(),
             "observed_present": OBSERVED_PATH.exists(),
         }
+
+    @app.get("/control/status")
+    def control_status(user=Depends(require_nova_user)):
+        from .control import update_status
+        return update_status(db_path)
+
+    @app.post("/control/quiesce")
+    def quiesce(user=Depends(require_nova_user)):
+        from .control import update_status
+        return update_status(db_path, pause=True)
+
+    @app.post("/control/resume")
+    def resume(user=Depends(require_nova_user)):
+        from .control import update_status
+        return update_status(db_path, pause=False)
 
     @app.post("/goals")
     def create_goal(body: dict, user=Depends(require_nova_user)):
@@ -124,6 +155,52 @@ def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
             for r in cur.fetchall()
         ]}
 
+    @app.get("/approvals")
+    def list_approvals(pending: bool = True, user=Depends(require_nova_user)):
+        """Return approval gates for a client inbox, newest request first.
+
+        Approvals deliberately remain daemon state.  A desktop client can close,
+        reconnect, or be replaced without losing an irreversible-action gate.
+        """
+        conn = connect(db_path)
+        query = ("SELECT a.id,a.task_id,a.action,a.payload_digest,a.requested_at,"
+                 "a.decided_at,a.decision,t.title FROM approval a "
+                 "JOIN task t ON t.id=a.task_id")
+        if pending:
+            query += " WHERE a.decision IS NULL"
+        rows = conn.execute(query + " ORDER BY a.requested_at DESC").fetchall()
+        return {"approvals": [
+            {"id": row[0], "task_id": row[1], "action": row[2],
+             "payload_digest": row[3], "requested_at": row[4],
+             "decided_at": row[5], "decision": row[6], "title": row[7]}
+            for row in rows
+        ]}
+
+    @app.post("/approvals/{approval_id}/decision")
+    def decide_approval(approval_id: str, body: dict, user=Depends(require_nova_user)):
+        """Persist a human approval decision exactly once.
+
+        Workers/schedulers own the action-specific transition after observing this
+        durable decision; the API must not guess whether an approval permits a
+        merge, deployment, or another irreversible action.
+        """
+        decision = body.get("decision")
+        if decision not in {"granted", "denied"}:
+            raise HTTPException(422, "decision must be granted or denied")
+        conn = connect(db_path)
+        now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        changed = conn.execute(
+            "UPDATE approval SET decision=?,decided_at=?,decided_by=? "
+            "WHERE id=? AND decision IS NULL",
+            (decision, now, user["email"], approval_id),
+        ).rowcount
+        if not changed:
+            exists = conn.execute("SELECT 1 FROM approval WHERE id=?", (approval_id,)).fetchone()
+            if not exists:
+                raise HTTPException(404, f"unknown approval {approval_id}")
+            raise HTTPException(409, "approval was already decided")
+        return {"id": approval_id, "decision": decision, "decided_at": now}
+
     @app.get("/sessions/{sid}/events")
     def get_events(sid: str, user=Depends(require_nova_user)):
         conn = connect(db_path)
@@ -132,14 +209,15 @@ def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
     @app.get("/sessions/{sid}/transcript")
     def get_transcript(sid: str, tail: int = 0, user=Depends(require_nova_user)):
         """Transcript text. tail=0 (default) → FULL transcript; tail=N → last N chars."""
-        from pathlib import Path as _P
-        for candidate in (_P.home() / ".aikod" / "transcripts").glob(f"{sid}*"):
-            if candidate.is_file():
-                text = candidate.read_text(errors="replace")
-                if tail and tail > 0:
-                    text = text[-tail:]
-                return {"session_id": sid, "file": candidate.name,
-                        "tail": text, "full": not tail}
+        from .supervisor import transcript_path
+        with database(db_path) as conn:
+            candidate = transcript_path(conn, sid)
+        if candidate:
+            text = candidate.read_text(errors="replace")
+            if tail and tail > 0:
+                text = text[-tail:]
+            return {"session_id": sid, "file": candidate.name,
+                    "tail": text, "full": not tail}
         raise HTTPException(404, f"no transcript for {sid}")
 
     @app.get("/sessions/{sid}/story")
@@ -156,18 +234,14 @@ def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
     @app.post("/sessions/{sid}/send")
     def send_to_session(sid: str, body: dict, user=Depends(require_nova_user)):
         """Send text into a live worker's tmux pane (ADR-010 attach)."""
-        import subprocess as _sp
-        r = _sp.run(["tmux", "has-session", "-t", f"aiko-{sid}"],
-                    capture_output=True)
-        if r.returncode != 0:
-            raise HTTPException(409, f"session aiko-{sid} not alive (exited workers can't receive input)")
+        from .supervisor import send_to_session as send
         text = str(body.get("text", ""))
         if not text.strip():
             raise HTTPException(400, "empty text")
-        _sp.run(["tmux", "send-keys", "-t", f"aiko-{sid}", "-l", text],
-                check=True)
-        _sp.run(["tmux", "send-keys", "-t", f"aiko-{sid}", "Enter"],
-                check=True)
+        try:
+            send(db_path, sid, text)
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(409, str(exc)) from exc
         conn = connect(db_path)
         append(conn, sid, "session.user_input",
                {"text": text[:500], "by": user["email"]})
@@ -192,6 +266,7 @@ def create_app(db_path, nova_jwt_secret: str | None = None) -> FastAPI:
         max_docs: int = Query(40, ge=1, le=200),
         auto_fix: bool = Query(True),
         write_report: bool = Query(True),
+        user=Depends(require_nova_user),
     ):
         """Proxy to the standalone docs-auditor service (port 4012).
         The auditor is NOT part of aikod — this is a convenience route for

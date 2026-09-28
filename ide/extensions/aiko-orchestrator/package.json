@@ -1,0 +1,38 @@
+{
+  "name": "aiko-orchestrator",
+  "displayName": "Aiko Orchestrator",
+  "description": "Durable AI agent orchestration for the Aiko IDE.",
+  "version": "0.1.0",
+  "publisher": "aiko",
+  "license": "MIT",
+  "engines": { "vscode": "^1.108.0" },
+  "categories": ["Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onView:aiko.sessions", "onView:aiko.approvals", "onCommand:aiko.newGoal", "onCommand:aiko.openAgent", "onCommand:aiko.browseSkills"],
+  "contributes": {
+    "configuration": {
+      "title": "Aiko",
+      "properties": {
+        "aiko.daemon.url": { "type": "string", "default": "", "description": "Authenticated aikod daemon URL. Leave blank to use direct local agents." },
+        "aiko.cli.path": { "type": "string", "default": "aiko", "description": "Path to the Aiko CLI used for direct persistent agent sessions." },
+        "aiko.agent.targets": { "type": "array", "default": ["local"], "items": { "type": "string" }, "description": "Aiko target names from your ~/.aiko/config.yaml servers list. Local is always available." }
+      }
+    },
+    "commands": [
+      { "command": "aiko.newGoal", "title": "Aiko: New Goal" },
+      { "command": "aiko.refreshSessions", "title": "Aiko: Refresh Sessions" },
+      { "command": "aiko.openAgent", "title": "Aiko: Open Persistent Agent" },
+      { "command": "aiko.attachSession", "title": "Aiko: Attach Session" },
+      { "command": "aiko.messageSession", "title": "Aiko: Message Session" },
+      { "command": "aiko.decideApproval", "title": "Aiko: Decide Approval" },
+      { "command": "aiko.browseSkills", "title": "Aiko: Browse Skills" },
+      { "command": "aiko.configureDaemon", "title": "Aiko: Configure Daemon" }
+    ],
+    "viewsContainers": { "activitybar": [{ "id": "aiko", "title": "Aiko", "icon": "resources/aiko.svg" }] },
+    "views": { "aiko": [{ "id": "aiko.sessions", "name": "Sessions" }, { "id": "aiko.approvals", "name": "Approvals" }] },
+    "menus": {
+      "view/title": [{ "command": "aiko.newGoal", "when": "view == aiko.sessions", "group": "navigation@1" }, { "command": "aiko.refreshSessions", "when": "view == aiko.sessions", "group": "navigation@2" }],
+      "view/item/context": [{ "command": "aiko.attachSession", "when": "view == aiko.sessions && viewItem == aiko-session", "group": "inline@1" }, { "command": "aiko.messageSession", "when": "view == aiko.sessions && viewItem == aiko-session", "group": "inline@2" }, { "command": "aiko.decideApproval", "when": "view == aiko.approvals && viewItem == aiko-approval", "group": "inline" }]
+    }
+  }
+}

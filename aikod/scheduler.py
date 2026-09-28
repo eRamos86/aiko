@@ -1,43 +1,71 @@
-"""v0.1 scheduler: FIFO queue. Real DAG traversal lands in v0.4 per Aiko roadmap."""
-import uuid
-from pathlib import Path
-
-from .db import connect
+"""Atomic routing and capacity reservation; external checks run outside transactions."""
+import json
+from .db import database, transaction
+from .control import paused
 from .events import append
 from .router import choose
 
 
 def tick(db_path, adapters=None, log=True):
-    """Route one ready task: pick provider+model, mark running, emit event.
-
-    v0.1: spawn is triggered by the caller after routing (the daemon loop
-    passes the decision to the chosen adapter). Returns (task_id, decision)
-    or None.
-    """
-    conn = connect(Path(db_path))
-    row = conn.execute(
-        "SELECT id, title, spec, goal_id FROM task "
-        "WHERE state='ready' AND assigned_provider IS NULL "
-        "ORDER BY created_at LIMIT 1"
-    ).fetchone()
-    if not row:
-        return None
-    task_id, title, spec, goal_id = row
-
-    # Infer task type from spec heuristics for v0.1; the planner (v0.4) will set it explicitly.
-    task_type = infer_task_type(title + "\n" + spec)
-
-    decision = choose(task_type, task_id, locality="auto",
-                       adapters=adapters, log=log)
-    conn.execute(
-        "UPDATE task SET state='running', assigned_provider=?, assigned_model=? WHERE id=?",
-        (decision.provider_id, decision.model, task_id),
-    )
-    append(conn, task_id, "task.routed", {
-        "provider": decision.provider_id, "model": decision.model,
-        "final_score": decision.final_score, "reasoning": decision.reasoning,
-    })
-    return task_id, decision
+    from .adapters.registry import ADAPTERS
+    pool = adapters if adapters is not None else ADAPTERS
+    with database(db_path) as conn:
+        if paused(conn):
+            return None
+        rows = conn.execute(
+            "SELECT t.id,t.title,t.spec,g.locality FROM task t JOIN goal g ON g.id=t.goal_id "
+            "WHERE t.state='ready' AND t.assigned_provider IS NULL ORDER BY t.created_at,t.id"
+        ).fetchall()
+        counts = dict(conn.execute("SELECT provider_id,COUNT(*) FROM session "
+                                  "WHERE state IN ('pending','spawning','live') GROUP BY provider_id"))
+        available = {k: v for k, v in pool.items()
+                     if counts.get(k, 0) < v.manifest.concurrency_limit}
+        if not available:
+            return None
+        for task_id, title, spec, locality in rows:
+            try:
+                decision = choose(infer_task_type(title + "\n" + spec), task_id,
+                                  locality=locality, adapters=available, log=False)
+            except RuntimeError:
+                continue  # unroutable work must not block independent tasks
+            provider = decision.provider_id
+            if provider not in available:
+                continue
+            adapter = available[provider]
+            metadata = (adapter.session_metadata({"id": task_id})
+                        if hasattr(adapter, "session_metadata") else {})
+            with transaction(conn):
+                count = conn.execute("SELECT COUNT(*) FROM session WHERE provider_id=? "
+                                     "AND state IN ('pending','spawning','live')", (provider,)).fetchone()[0]
+                if paused(conn) or count >= adapter.manifest.concurrency_limit:
+                    return None
+                changed = conn.execute(
+                    "UPDATE task SET state='running',assigned_provider=?,assigned_model=? "
+                    "WHERE id=? AND state='ready' AND assigned_provider IS NULL",
+                    (provider, decision.model, task_id)).rowcount
+                if not changed:
+                    continue
+                conn.execute("INSERT INTO session(id,task_id,provider_id,model,state,"
+                             "transcript_path,worktree_path,tmux_socket) VALUES (?,?,?,?,'pending',?,?,?)",
+                             (task_id, task_id, provider, decision.model, metadata.get("transcript_path"),
+                              metadata.get("worktree_path"), metadata.get("tmux_socket")))
+                conn.execute("INSERT INTO routing_decision(task_id,chosen_provider,chosen_model,"
+                             "yaml_scores_json,observed_weights_json,reasoning,ts) "
+                             "VALUES (?,?,?,?,?,?,datetime('now'))",
+                             (task_id, provider, decision.model,
+                              json.dumps({"chosen": decision.yaml_score, "candidates": decision.candidates}),
+                              json.dumps({"chosen": decision.observed_modifier}), decision.reasoning))
+                append(conn, task_id, "task.routed", {
+                    "provider": provider, "model": decision.model,
+                    "final_score": decision.final_score, "reasoning": decision.reasoning})
+            if log:
+                try:
+                    from .routing_log import write_decision
+                    write_decision(task_id, decision)
+                except OSError:
+                    pass  # DB audit is authoritative
+            return task_id, decision
+    return None
 
 
 def infer_task_type(text: str) -> str:

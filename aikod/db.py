@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 
 SCHEMA = """
@@ -99,9 +100,51 @@ CREATE INDEX IF NOT EXISTS idx_session_task ON session(task_id);
 def connect(path: Path) -> sqlite3.Connection:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(path, isolation_level=None)  # autocommit; explicit txns managed by callers
+    c = sqlite3.connect(path, isolation_level=None, timeout=30)
     c.executescript(SCHEMA)
+    # Additive migrations: preserve old rows and the legacy orchestrator ledger.
+    with transaction(c):
+        for table, columns in {
+            "session": {"tmux_socket": "TEXT", "exit_code": "INTEGER", "error": "TEXT"},
+        }.items():
+            existing = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+            for name, declaration in columns.items():
+                if name not in existing:
+                    c.execute(f"ALTER TABLE {table} ADD COLUMN {name} {declaration}")
+        c.execute("CREATE TABLE IF NOT EXISTS orchestrator_run ("
+                  "task_id TEXT PRIMARY KEY, reply TEXT, ts TEXT)")
+        c.execute("CREATE TABLE IF NOT EXISTS orchestrator_job ("
+                  "task_id TEXT PRIMARY KEY REFERENCES task(id), "
+                  "state TEXT NOT NULL DEFAULT 'pending', history TEXT, "
+                  "reply TEXT, error TEXT, retry_at REAL NOT NULL DEFAULT 0)")
+        c.execute("CREATE TABLE IF NOT EXISTS orchestrator_effect ("
+                  "task_id TEXT NOT NULL, call_id TEXT NOT NULL, result TEXT NOT NULL, "
+                  "PRIMARY KEY(task_id, call_id))")
+        c.execute("CREATE TABLE IF NOT EXISTS daemon_control ("
+                  "id INTEGER PRIMARY KEY CHECK(id=1), paused INTEGER NOT NULL DEFAULT 0)")
+        c.execute("INSERT OR IGNORE INTO daemon_control(id) VALUES (1)")
     return c
+
+
+@contextmanager
+def transaction(conn):
+    """Serialize short state transitions across connections/processes."""
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        yield conn
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+
+
+@contextmanager
+def database(path):
+    conn = connect(path)
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def hash_token(token: str) -> str:

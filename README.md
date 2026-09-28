@@ -15,7 +15,7 @@
 
 ---
 
-Aiko is a terminal-native orchestrator for AI coding agents. Text her a goal —
+Aiko is an agent orchestrator for AI coding agents. Text her a goal —
 *"there's a login bug in flux"* — and she decomposes it, dispatches the work to
 your agents (Codex, Claude Code, Hermes, Antigravity, whatever you configure),
 watches the results, and coordinates follow-ups (fix → review → document).
@@ -23,7 +23,8 @@ She's a catgirl, nya~.
 
 ## Features
 
-- 💬 **Chat-centric TUI** — talk to Aiko like any other agent; she orchestrates the rest
+- 🖥️ **Aiko IDE foundation** — a branded Code-OSS distribution with normal editing, terminal, source control, debugging, and Aiko orchestration
+- 💬 **Chat-centric TUI and CLI** — full headless/remote clients as well as the IDE
 - 🎯 **Multi-target dispatch** — local agents, one server, or many; Aiko picks (or you say "on the server")
 - 🧠 **Any brain, any provider** — NIM, OpenRouter, OpenAI, local Ollama — anything OpenAI-compatible, config-driven
 - 📋 **Live session attach** — watch any worker's transcript stream, message it mid-run
@@ -74,6 +75,23 @@ orchestrates everything on your machine.
 add it to `servers:`, and Aiko dispatches across machines — heavy work to the
 server, quick stuff local. `aikod` has its own router (YAML floor + observed
 signal modifiers) that picks provider+model per task.
+
+## Aiko IDE
+
+The desktop app is built as a **Code-OSS distribution**, not a browser-based
+editor recreation. The source overlay in [`ide/`](ide/) pins a specific upstream
+commit, changes only Aiko product identity, and supplies an auditable built-in
+orchestration extension. It stores daemon tokens in Code-OSS SecretStorage.
+
+Prepare a disposable Code-OSS build tree with:
+
+```bash
+python scripts/bootstrap_code_oss.py --destination /tmp/aiko-ide-source
+```
+
+The command downloads a pinned upstream **archive** rather than creating another
+Git clone. It does not touch `~/.aiko`, existing Aiko workers, or a workspace.
+See [`ide/README.md`](ide/README.md) for the build and attribution contract.
 
 ## TUI keys & slash commands
 

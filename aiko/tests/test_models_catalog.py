@@ -86,7 +86,12 @@ def test_pick_brain_heavy_shape_sticks_to_top(env, monkeypatch):
     assert seen == {"m-a"}    # never explores away from the top pick
 
 
-def test_brain_from_provider_model_builds_adhoc():
+def test_brain_from_provider_model_builds_adhoc(monkeypatch):
+    monkeypatch.setattr("aiko.brain._load_cfg", lambda: {"brains": [{
+        "name": "test", "type": "openai_compatible",
+        "base_url": "https://integrate.api.nvidia.com/v1",
+        "api_key": "test-only", "model": "test-model",
+    }]})
     from aiko.brain import Brain
     b = Brain.from_provider_model("nim", "nvidia/test-model")
     assert b.model == "nvidia/test-model"

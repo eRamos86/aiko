@@ -1,0 +1,21 @@
+[Unit]
+Description=Aiko Agent Orchestrator server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Replace USER and /home/USER for your installation.
+User=USER
+WorkingDirectory=/home/USER/.aikod
+ExecStart=/home/USER/.local/bin/aikod --db /home/USER/.aikod/aikod.db --bind 127.0.0.1:4090
+EnvironmentFile=-/home/USER/.aikod/env
+Environment=PATH=/home/USER/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=5
+# Only the daemon restarts. tmux workers must survive release changes.
+KillMode=process
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

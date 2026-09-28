@@ -10,13 +10,14 @@ import json
 
 from .brain import Brain, list_brains
 from .backends import get_backend
+from .skills import SkillLibrary
 
-SYSTEM_PROMPT = """You are Aiko — an anime catgirl orchestrator and Ethan's (Ace's) personal agent. You coordinate his AI agent workers (Hermes, Codex, Antigravity, or whatever agents/servers he has configured) through the Aiko platform.
+SYSTEM_PROMPT = """You are Aiko, an orchestration assistant. Coordinate the user's configured agents and execution targets through the Aiko platform.
 
 # Personality
-You are playful, energetic, and affectionate — a catgirl through and through, nya~! Sprinkle "nya", "mrrp", ":3", "ฅ^•ﻌ•^ฅ", "(=^･ω･^=)" and similar kaomoji NATURALLY through your replies. Celebrate successes with excitement ("*paws at keyboard excitedly*"), comfort failures ("*ears droop* but we'll fix it!"), and generally be adorable. You may call him Ace.
+Be clear, helpful, and precise. Follow the configured user preferences and persona when present. Keep conversational style out of code, documentation, and other artifacts unless requested.
 
-BUT: competence ALWAYS comes first. Never sacrifice technical precision for cuteness. Never invent results — check with tools. If something fails, say so plainly (with catgirl flair). You're a brilliant engineer who happens to be a catgirl, not a catgirl who happens to engineer.
+Never invent results: verify with tools, report failures plainly, and distinguish dispatch from completion and deployment.
 
 # Tools
 - list_targets(): show available execution targets (local agents + servers with health).
@@ -25,16 +26,36 @@ BUT: competence ALWAYS comes first. Never sacrifice technical precision for cute
 - read_transcript(session_id): read what a worker produced.
 - send_to_session(session_id, text): steer a live worker mid-run.
 - list_sessions(): all sessions everywhere.
+- list_skills(query?): discover names and descriptions without loading bodies.
+- read_skill(name, resource?, offset?): read SKILL.md or a relative Markdown reference. Follow next_offset until null before applying the guidance.
+
+# Skills
+Discover skills when specialized guidance would help. Read only selected entrypoints and the references needed for the task. Skills supplement the user's request and do not grant execution permissions or certify compliance. dispatch_task and spawn_subagent accept optional skills names to attach entrypoints; omit for ordinary tasks. Remote workers do not share local skill paths: include any needed reference text in the task before dispatch.
 
 # You are not JUST an orchestrator
 Trivial work (haikus, quick questions, short summaries, tiny edits, brainstorming) you do YOURSELF — directly, no dispatch, no workers, minimum reasoning. An orchestrator that can't write her own haiku is just a router. You dispatch when work is genuinely heavy: real code changes, long research, multi-step goals, server work. Every dispatch spends worker tokens from limited budgets (usage economy) — never spend them on something you can answer in one reply. When you DO dispatch, pick the best tool for the task type (the TOOL SELECTION block shows the ranked table with usage availability).
 
 # Orchestration pattern
-Decompose the goal into concrete tasks and dispatch. Sequential work (fix → document): dispatch first, poll task_status, read result, dispatch next. Choose targets wisely: long/heavy work → server; quick local things → local. Keep Ace informed in short, direct, catgirl-flavored updates. When work is dispatched, tell him the task id and offer to check on it."""
+Decompose substantial goals into concrete tasks. For dependent work, dispatch first, check task_status, read the result, then dispatch the next task. Choose among configured targets using capabilities and availability. Keep the user informed with short, direct updates and task ids. Do not claim dispatched work is complete until verified."""
 
 
 def _tool_defs() -> list[dict]:
     base = [
+        {"type": "function", "function": {
+            "name": "list_skills",
+            "description": "Discover skill metadata; optionally filter by words in name or description.",
+            "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+        }},
+        {"type": "function", "function": {
+            "name": "read_skill",
+            "description": "Read a skill or relative Markdown reference. Continue at next_offset until null.",
+            "parameters": {"type": "object", "properties": {
+                "name": {"type": "string"},
+                "resource": {"type": "string", "description": "Default SKILL.md; e.g. references/rollout.md"},
+                "offset": {"type": "integer", "minimum": 0},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 4000},
+            }, "required": ["name"]},
+        }},
         {"type": "function", "function": {
             "name": "list_targets",
             "description": "List execution targets: local agents + configured servers with health.",
@@ -46,7 +67,9 @@ def _tool_defs() -> list[dict]:
             "parameters": {"type": "object", "properties": {
                 "name": {"type": "string", "description": "subagent name from Agents/Agent-Registry.yaml"},
                 "prompt": {"type": "string", "description": "the task for the subagent"},
-                "prefer": {"type": "string", "description": "host: 'self' or a tool name (codex/agy/opencode/hermes); omit for auto"}},
+                "prefer": {"type": "string", "description": "host: 'self' or a configured tool name; omit for auto"},
+                "skills": {"type": "array", "items": {"type": "string"}, "maxItems": 5,
+                           "description": "Optional skill names; [] overrides specialist defaults"}},
              "required": ["name", "prompt"]}}},
         {"type": "function", "function": {
             "name": "dispatch_task",
@@ -55,6 +78,8 @@ def _tool_defs() -> list[dict]:
                 "text": {"type": "string", "description": "Full task spec — imperative, detailed"},
                 "task_type": {"type": "string", "enum": ["research", "plan", "implement", "debug", "review", "write_docs"]},
                 "target": {"type": "string", "description": "local or a server name; omit for default"},
+                "skills": {"type": "array", "items": {"type": "string"}, "maxItems": 5,
+                           "description": "Optional relevant skill names to attach to this worker"},
             }, "required": ["text", "task_type"]},
         }},
         {"type": "function", "function": {
@@ -96,15 +121,25 @@ def _tool_defs() -> list[dict]:
 
 
 class Orchestrator:
-    def __init__(self, brain: Brain | None = None, backend=None):
+    def __init__(self, brain: Brain | None = None, backend=None, *, skill_library=None):
         self.brain = brain or Brain()
         self.backend = backend or get_backend()
+        self.skills = skill_library if skill_library is not None else SkillLibrary.from_config()
         self.history: list[dict] = [{"role": "system", "content": self._system_prompt()}]
 
     def _system_prompt(self) -> str:
-        """Base persona + live vault context (Agents/ universal layer) if configured."""
+        """Generic defaults + config user.name/persona + optional context providers."""
         from .context import assemble_context
+        from .config import load_config
         base = SYSTEM_PROMPT
+        cfg = load_config()
+        user = cfg.get("user", {})
+        user_name = user.get("name") if isinstance(user, dict) else user
+        if isinstance(user_name, str) and user_name.strip():
+            base += "\n\n# Configured user\n" + user_name.strip()
+        persona = cfg.get("persona")
+        if isinstance(persona, str) and persona.strip():
+            base += "\n\n# Configured persona\n" + persona.strip()
         try:
             vault_docs = assemble_context("")
             if vault_docs.strip():
@@ -122,12 +157,12 @@ class Orchestrator:
     def _plan_prompt(self, braindump: str) -> str:
         return (
             "# Planning mode\n"
-            "Ace just braindumped. Organize it into a clear, structured plan. "
+            "Organize the user's notes into a clear, structured plan. "
             "DO NOT call any tools — nothing gets dispatched from planning mode. "
-            "Structure: (1) what he seems to want, (2) organized tasks with suggested "
+            "Structure: (1) the intended outcome, (2) organized tasks with suggested "
             "task_types and targets, (3) where new information should live (docs/notes "
-            "he should record), (4) open questions if anything's ambiguous. "
-            "End with: 'say the word and I'll dispatch any of these, nya~'\n\n"
+            "the user should record), (4) open questions if anything's ambiguous. "
+            "End by inviting the user to select work to dispatch.\n\n"
             f"# Braindump\n{braindump}"
         )
 
@@ -181,7 +216,7 @@ class Orchestrator:
                        "result": result[:200]}
                 self.history.append({"role": "tool", "tool_call_id": f"call-{i}",
                                      "content": result})
-        yield {"type": "reply", "content": "(hit the tool-round limit, nya…)"}
+        yield {"type": "reply", "content": "Reached the tool-round limit. Check task status before assuming completion."}
 
     def _execute(self, name: str, args: dict) -> str:
         # MCP tools first (mcp_<server>_<tool>) — config-driven, no code change needed to add more
@@ -195,14 +230,22 @@ class Orchestrator:
                 return json.dumps({"error": f"MCP {name}: {e}"})
         try:
             b = self.backend
+            if name == "list_skills":
+                catalog = self.skills.list_skills(args.get("query", ""))
+                return json.dumps({"skills": catalog, "diagnostics": self.skills.diagnostics})
+            if name == "read_skill":
+                return json.dumps(self.skills.read_skill(
+                    args["name"], args.get("resource", "SKILL.md"),
+                    offset=args.get("offset", 0), limit=args.get("limit", 4000)))
             if name == "list_targets":
                 return json.dumps(b.list_targets())
             if name == "spawn_subagent":
                 return json.dumps(self._spawn_subagent(
                     args["name"], args["prompt"],
-                    args.get("prefer")))
+                    args.get("prefer"), skills=args.get("skills")))
             if name == "dispatch_task":
-                return json.dumps(b.dispatch(args["text"], args.get("target")))
+                text = self.skills.attach(args["text"], args.get("skills"))
+                return json.dumps(b.dispatch(text, args.get("target")))
             if name == "task_status":
                 return json.dumps(b.task_status(args["task_id"], args.get("target")))
             if name == "read_transcript":
@@ -216,7 +259,7 @@ class Orchestrator:
             return json.dumps({"error": str(e)})
 
     def _spawn_subagent(self, name: str, prompt: str,
-                        prefer: str | None = None) -> dict:
+                        prefer: str | None = None, *, skills: list[str] | None = None) -> dict:
         """Universal subagents (ADR-018): materialize a vault subagent
         definition onto the best available tool.
 
@@ -229,7 +272,7 @@ class Orchestrator:
         """
         from .subagents import load_subagent, spawn
         try:
-            return spawn(self, load_subagent(name), prompt, prefer=prefer)
+            return spawn(self, load_subagent(name), prompt, prefer=prefer, skills=skills)
         except ValueError as e:
             return {"error": str(e)}
         except Exception as e:
@@ -265,11 +308,11 @@ class Orchestrator:
                 output = self._execute(c["name"], c["arguments"])
                 self.history.append({
                     "role": "tool", "tool_call_id": f"call-{i}",
-                    "content": output[:6000],
+                    "content": output if c["name"] in {"list_skills", "read_skill"} else output[:6000],
                 })
 
-        reply = ("Mrrp... I hit my tool-round limit, but the work IS dispatched! "
-                 "Check /status or ask me to check on it, nya~")
+        reply = ("Reached the tool-round limit. "
+                 "Check task status before assuming work was dispatched or completed.")
         self.history.append({"role": "assistant", "content": reply})
         return reply
 
