@@ -27,7 +27,7 @@ jobs:
       - name: Verify Aiko code and release contract
         run: |
           python3 -m venv "$RUNNER_TEMP/aiko-test-venv"
-          "$RUNNER_TEMP/aiko-test-venv/bin/python" -m pip install pytest pytest-asyncio
+          "$RUNNER_TEMP/aiko-test-venv/bin/python" -m pip install -e '.[dev]'
           "$RUNNER_TEMP/aiko-test-venv/bin/python" -m pytest -q
           node --check ide/extensions/aiko-orchestrator/extension.js
       - name: Build unsigned Apple Silicon candidate
