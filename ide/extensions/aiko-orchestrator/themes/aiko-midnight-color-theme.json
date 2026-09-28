@@ -1,0 +1,35 @@
+{
+  "$schema": "vscode://schemas/color-theme",
+  "name": "Aiko Midnight",
+  "type": "dark",
+  "colors": {
+    "focusBorder": "#ff8fc7",
+    "foreground": "#f7eef6",
+    "descriptionForeground": "#b9a8bb",
+    "editor.background": "#120d18",
+    "editor.foreground": "#f7eef6",
+    "editor.lineHighlightBackground": "#21172a",
+    "editor.selectionBackground": "#74365e88",
+    "sideBar.background": "#190f21",
+    "sideBar.foreground": "#f2e2ef",
+    "activityBar.background": "#25112d",
+    "activityBar.foreground": "#ffb0d9",
+    "activityBar.activeBorder": "#ff8fc7",
+    "titleBar.activeBackground": "#190f21",
+    "titleBar.activeForeground": "#ffeef8",
+    "statusBar.background": "#25112d",
+    "statusBar.foreground": "#ffe8f5",
+    "button.background": "#c85b96",
+    "button.hoverBackground": "#e374ae",
+    "badge.background": "#9a6ce0",
+    "terminal.ansiMagenta": "#f08ac2",
+    "terminal.ansiCyan": "#7ed9e4",
+    "terminal.ansiGreen": "#8ad9af"
+  },
+  "tokenColors": [
+    { "scope": ["comment"], "settings": { "foreground": "#987f9a", "fontStyle": "italic" } },
+    { "scope": ["string"], "settings": { "foreground": "#a9e5bb" } },
+    { "scope": ["keyword", "storage"], "settings": { "foreground": "#ff9dcd" } },
+    { "scope": ["entity.name.function", "support.function"], "settings": { "foreground": "#8ed8ee" } }
+  ]
+}

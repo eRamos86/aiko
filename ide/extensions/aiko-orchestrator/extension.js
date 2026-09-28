@@ -46,6 +46,43 @@ class SessionItem extends vscode.TreeItem {
   }
 }
 
+class LocalSessionItem extends vscode.TreeItem {
+  constructor(session) {
+    super(session.title, vscode.TreeItemCollapsibleState.None);
+    this.session = session;
+    this.description = session.description;
+    this.tooltip = session.tooltip;
+    this.contextValue = session.attachable ? 'aiko-local-tmux' : 'aiko-local-process';
+    if (session.attachable) this.command = { command: 'aiko.attachLocalSession', title: 'Attach Local Session', arguments: [this] };
+  }
+}
+
+async function discoverLocalSessions() {
+  const exec = promisify(execFile);
+  const rows = [];
+  try {
+    const { stdout } = await exec('tmux', ['list-sessions', '-F', '#{session_name}|#{session_created}|#{session_attached}'], { maxBuffer: 64 * 1024 });
+    for (const line of stdout.split(/\r?\n/).filter(Boolean)) {
+      const [name, created, attached] = line.split('|');
+      if (!name) continue;
+      rows.push({ kind: 'tmux', name, title: name, attachable: true,
+        description: `tmux · ${attached === '1' ? 'attached' : 'detached'}`,
+        tooltip: `Local tmux session: ${name}\nCreated: ${created || 'unknown'}` });
+    }
+  } catch { /* tmux is optional; process discovery still works. */ }
+  try {
+    const { stdout } = await exec('ps', ['-axo', 'pid=,command='], { maxBuffer: 256 * 1024 });
+    for (const line of stdout.split(/\r?\n/)) {
+      const match = line.trim().match(/^(\d+)\s+(.+)$/);
+      if (!match || !/\b(codex|hermes|opencode|agy|antigravity)\b/i.test(match[2])) continue;
+      const command = match[2].replace(/(api[_-]?key|token|password|secret)=?\S+/ig, '$1=[redacted]');
+      rows.push({ kind: 'process', pid: match[1], title: `PID ${match[1]}`, attachable: false,
+        description: 'local agent process', tooltip: command });
+    }
+  } catch { /* Process discovery is best-effort on restricted hosts. */ }
+  return rows;
+}
+
 class ApprovalItem extends vscode.TreeItem {
   constructor(approval) {
     super(`${approval.action}: ${approval.title || approval.task_id}`, vscode.TreeItemCollapsibleState.None);
@@ -62,10 +99,11 @@ class SessionsProvider {
   refresh() { this.changed.fire(); }
   async getChildren() {
     const base = daemonUrl();
-    if (!base) return [new vscode.TreeItem('Configure an aikod daemon, or open a local persistent agent.')];
+    const local = (await discoverLocalSessions()).map((session) => new LocalSessionItem(session));
+    if (!base) return local.length ? local : [new vscode.TreeItem('Configure an aikod daemon, or open a local persistent agent.')];
     try {
       const response = await request(`${base}/sessions`, await this.context.secrets.get(TOKEN_KEY));
-      return (response.sessions || []).map((session) => new SessionItem(session));
+      return [...(response.sessions || []).map((session) => new SessionItem(session)), ...local];
     } catch (error) {
       const item = new vscode.TreeItem(`Aiko unavailable: ${error.message}`);
       item.command = { command: 'aiko.configureDaemon', title: 'Configure Aiko' };
@@ -155,6 +193,11 @@ function activate(context) {
       const panel = vscode.window.createWebviewPanel('aikoSession', `Aiko · ${item.session.title || item.session.id}`, vscode.ViewColumn.Beside, {});
       panel.webview.html = `<!doctype html><html><body><pre>${escapeHtml(transcript.tail || '')}</pre></body></html>`;
     } catch (error) { vscode.window.showErrorMessage(`Aiko could not attach: ${error.message}`); }
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand('aiko.attachLocalSession', async (item) => {
+    if (!item || !item.session || item.session.kind !== 'tmux') return;
+    const terminal = vscode.window.createTerminal({ name: `Aiko · ${item.session.name}`, shellPath: 'tmux', shellArgs: ['attach-session', '-t', item.session.name] });
+    terminal.show();
   }));
   context.subscriptions.push(vscode.commands.registerCommand('aiko.messageSession', async (item) => {
     if (!item || !item.session) return;

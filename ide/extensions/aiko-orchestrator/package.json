@@ -18,12 +18,18 @@
         "aiko.agent.targets": { "type": "array", "default": ["local"], "items": { "type": "string" }, "description": "Aiko target names from your ~/.aiko/config.yaml servers list. Local is always available." }
       }
     },
+    "configurationDefaults": {
+      "workbench.colorTheme": "Aiko Midnight",
+      "workbench.iconTheme": null
+    },
+    "themes": [{ "label": "Aiko Midnight", "uiTheme": "vs-dark", "path": "./themes/aiko-midnight-color-theme.json" }],
     "commands": [
       { "command": "aiko.newGoal", "title": "Aiko: New Goal" },
       { "command": "aiko.refreshSessions", "title": "Aiko: Refresh Sessions" },
       { "command": "aiko.openAgent", "title": "Aiko: Open Persistent Agent" },
       { "command": "aiko.attachSession", "title": "Aiko: Attach Session" },
       { "command": "aiko.messageSession", "title": "Aiko: Message Session" },
+      { "command": "aiko.attachLocalSession", "title": "Aiko: Attach Local tmux Session" },
       { "command": "aiko.decideApproval", "title": "Aiko: Decide Approval" },
       { "command": "aiko.browseSkills", "title": "Aiko: Browse Skills" },
       { "command": "aiko.configureDaemon", "title": "Aiko: Configure Daemon" }

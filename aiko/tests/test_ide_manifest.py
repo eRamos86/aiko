@@ -21,5 +21,15 @@ def test_ide_extension_exposes_durable_agent_commands():
     source = (ROOT / "ide" / "extensions" / "aiko-orchestrator" / "extension.js").read_text()
     assert "context.secrets" in source
     assert "/approvals" in source
+    assert "discoverLocalSessions" in source
+    assert "aiko.attachLocalSession" in source
     assert "aiko skills" not in source  # CLI path is configured, never shell-interpolated.
     assert "poopmachine" not in source
+
+
+def test_ide_has_its_own_aiko_theme():
+    manifest = json.loads((ROOT / "ide" / "extensions" / "aiko-orchestrator" / "package.json").read_text())
+    theme = manifest["contributes"]["themes"][0]
+    assert theme["label"] == "Aiko Midnight"
+    palette = json.loads((ROOT / "ide" / "extensions" / "aiko-orchestrator" / "themes" / "aiko-midnight-color-theme.json").read_text())
+    assert palette["colors"]["activityBar.background"] == "#25112d"
